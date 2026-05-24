@@ -1,0 +1,16 @@
+services:
+  mimo-pool:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      DB_PATH: "/data/mimo-pool.sqlite"
+      ADMIN_TOKEN: "change-me-admin"
+      PROXY_TOKENS: "change-me-proxy"
+    volumes:
+      - mimo-pool-data:/data
+
+volumes:
+  mimo-pool-data:
