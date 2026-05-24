@@ -1,7 +1,7 @@
 import { createApp } from './server.ts';
 import { createSqliteStore } from './store.ts';
 
-const port = Number(process.env.PORT ?? 3000);
+const port = Number(process.env.PORT ?? 3100);
 const host = process.env.HOST ?? '0.0.0.0';
 const store = createSqliteStore();
 const server = createApp({ store });

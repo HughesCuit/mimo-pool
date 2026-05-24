@@ -28,13 +28,13 @@ $env:PROXY_TOKENS = "proxy-secret"
 npm.cmd start
 ```
 
-打开 `http://localhost:3000/admin`，使用 `ADMIN_TOKEN` 登录后台。
+打开 `http://localhost:3100/admin`，使用 `ADMIN_TOKEN` 登录后台。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PORT` | `3000` | HTTP 端口 |
+| `PORT` | `3100` | HTTP 端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DB_PATH` | `data/mimo-pool.sqlite` | SQLite 文件路径 |
 | `ADMIN_TOKEN` | `change-me-admin` | 管理后台/API token |
@@ -46,7 +46,7 @@ npm.cmd start
 ## 调用示例
 
 ```powershell
-curl.exe http://localhost:3000/v1/chat/completions `
+curl.exe http://localhost:3100/v1/chat/completions `
   -H "Authorization: Bearer proxy-secret" `
   -H "Content-Type: application/json" `
   -d "{\"model\":\"mimo\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
