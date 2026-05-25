@@ -6,6 +6,7 @@ import { readBody, readJson, sendError, sendJson, sendText } from './http.ts';
 import { NoAvailableKeysError, prepareStreamingProxy, proxyCompatibleRequest } from './proxy.ts';
 import { createResponsesSseTransformer, isStreamingResponsesRequest, proxyResponsesViaChatCompletions, responsesChatProxyRequest } from './responses-compat.ts';
 import { createDebugContext, debugBody, debugLog } from './debug.ts';
+import { addModelAliasesToList, applyModelAlias, restoreModelAlias } from './model-alias.ts';
 import type { KeyStatus, Protocol, Store } from './types.ts';
 
 export type ServerOptions = {
@@ -145,12 +146,15 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
     return;
   }
   const wantsStream = bodyIncludesStreamTrue(body);
+  const alias = protocol === 'openai' && req.method !== 'GET' && req.method !== 'HEAD'
+    ? applyModelAlias(body, debug)
+    : { body };
   const proxyRequest = {
     protocol,
     method: req.method ?? 'POST',
     path,
     headers: req.headers,
-    body,
+    body: alias.body,
     debug
   };
 
@@ -180,9 +184,12 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
     }
 
     const result = await proxyCompatibleRequest(store, proxyRequest);
+    const responseBody = protocol === 'openai' && path === '/v1/models'
+      ? addModelAliasesToList(result.body)
+      : restoreModelAlias(result.body, alias.originalModel, alias.upstreamModel, debug);
     res.writeHead(result.status, responseHeaders(result.headers));
-    res.end(result.body);
-    debugLog(debug, 'proxy.request_end', { status: result.status, target: result.target, ...debugBody('responseBody', result.body) });
+    res.end(responseBody);
+    debugLog(debug, 'proxy.request_end', { status: result.status, target: result.target, ...debugBody('responseBody', responseBody) });
     return;
   } catch (error) {
     debugLog(debug, 'proxy.request_error', { error: error instanceof Error ? error.message : String(error) });
@@ -218,7 +225,11 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       res.end();
       return;
     }
-    const transformer = createResponsesSseTransformer(proxyRequest.fallbackModel, { requestMessages: proxyRequest.chatMessages, debug });
+    const transformer = createResponsesSseTransformer(proxyRequest.fallbackModel, {
+      requestMessages: proxyRequest.chatMessages,
+      debug,
+      modelOverride: proxyRequest.originalModel
+    });
     const reader = upstream.body.getReader();
     let downstreamChunks = 0;
     let downstreamBytes = 0;

@@ -1,4 +1,5 @@
 import { directCompatibleRequest, proxyCompatibleRequest } from './proxy.ts';
+import { aliasModelIds } from './model-alias.ts';
 import type { Protocol, Store } from './types.ts';
 
 export type ChatApiType = 'openai-chat' | 'openai-responses' | 'anthropic-messages';
@@ -64,7 +65,7 @@ export async function listAdminModels(store: Store, request: Pick<ChatRequest, '
     apiType,
     protocol,
     status: result.status,
-    models: extractModelIds(raw),
+    models: protocol === 'openai' ? aliasModelIds(extractModelIds(raw)) : extractModelIds(raw),
     raw,
     target: result.target
   };
