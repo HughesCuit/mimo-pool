@@ -702,3 +702,62 @@ test('non-streaming responses map chat length finish_reason to incomplete respon
     await target.close();
   }
 });
+
+test('debug mode logs proxy request flow without leaking raw API keys', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const previousDebug = process.env.DEBUG_PROXY;
+  const previousBody = process.env.DEBUG_PROXY_BODY;
+  process.env.DEBUG_PROXY = '1';
+  process.env.DEBUG_PROXY_BODY = '1';
+  const logs = [];
+  const originalError = console.error;
+  console.error = (...args) => {
+    logs.push(args.join(' '));
+  };
+  const target = await upstream(async (req, res) => {
+    for await (const _chunk of req) {
+      // drain request
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-debug',
+      model: 'mimo-v2.5-pro',
+      choices: [{ message: { role: 'assistant', content: 'debug ok' }, finish_reason: 'stop' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['tp-debug-secret-key-123456']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'mimo-v2.5-pro', input: 'hello', stream: false })
+      });
+      await response.text();
+      const text = logs.join('\n');
+
+      assert.equal(response.status, 200);
+      assert.match(text, /\[mimo-pool:debug\]/);
+      assert.match(text, /proxy\.request_start/);
+      assert.match(text, /proxy\.upstream_attempt/);
+      assert.match(text, /responses\.compat_response/);
+      assert.match(text, /tp-d\.\.\.3456/);
+      assert.doesNotMatch(text, /tp-debug-secret-key-123456/);
+      assert.doesNotMatch(text, /Bearer proxy-secret/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    console.error = originalError;
+    if (previousDebug === undefined) delete process.env.DEBUG_PROXY;
+    else process.env.DEBUG_PROXY = previousDebug;
+    if (previousBody === undefined) delete process.env.DEBUG_PROXY_BODY;
+    else process.env.DEBUG_PROXY_BODY = previousBody;
+    await target.close();
+  }
+});

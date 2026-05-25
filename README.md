@@ -30,6 +30,19 @@ npm.cmd start
 
 打开 `http://localhost:3100/admin`，使用 `ADMIN_TOKEN` 登录后台。
 
+调试模式会输出请求级代理日志，适合排查 Codex 中途停住、上游异常或 Responses 转换问题：
+
+```powershell
+npm.cmd run debug
+```
+
+默认只输出元数据和脱敏后的 key。需要查看截断正文时可以额外设置：
+
+```powershell
+$env:DEBUG_PROXY_BODY = "1"
+npm.cmd run debug
+```
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -42,6 +55,9 @@ npm.cmd start
 | `UPSTREAM_TIMEOUT_MS` | `120000` | 上游请求超时 |
 | `MAX_BODY_BYTES` | `20971520` | 请求体大小限制 |
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic 请求默认版本头 |
+| `DEBUG_PROXY` | `0` | 开启代理调试日志 |
+| `DEBUG_PROXY_BODY` | `0` | 输出截断后的请求/响应正文预览 |
+| `DEBUG_PROXY_BODY_LIMIT` | `2000` | 正文预览最大字符数 |
 
 ## 调用示例
 

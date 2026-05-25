@@ -1,4 +1,5 @@
 import { buildRoutePlan, classifyUpstreamFailure, resolveUpstreamUrl } from './routing.ts';
+import { debugBody, debugLog, type DebugContext } from './debug.ts';
 import type { Protocol, Store } from './types.ts';
 
 export type ProxyRequest = {
@@ -7,6 +8,7 @@ export type ProxyRequest = {
   path: string;
   headers: Record<string, string | string[] | undefined>;
   body: Buffer;
+  debug?: DebugContext;
 };
 
 export type ProxyResult = {
@@ -25,12 +27,18 @@ export class NoAvailableKeysError extends Error {
 export async function proxyCompatibleRequest(store: Store, request: ProxyRequest): Promise<ProxyResult> {
   const plan = await buildRoutePlan(store, request.protocol);
   if (plan.length === 0) throw new NoAvailableKeysError();
+  debugLog(request.debug, 'proxy.route_plan', { candidateCount: plan.length });
 
   let lastResult: ProxyResult | null = null;
   let lastError: Error | null = null;
 
   for (const target of plan) {
     const url = resolveUpstreamUrl(target.baseUrl, request.path, request.protocol);
+    debugLog(request.debug, 'proxy.upstream_attempt', {
+      url: safeUrl(url),
+      target: compactTarget(target),
+      ...debugBody('requestBody', request.body)
+    });
     try {
       const response = await fetch(url, {
         method: request.method,
@@ -40,6 +48,12 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
       });
       const body = Buffer.from(await response.arrayBuffer());
       const headers = headersObject(response.headers);
+      debugLog(request.debug, 'proxy.upstream_response', {
+        status: response.status,
+        ok: response.ok,
+        target: compactTarget(target),
+        ...debugBody('responseBody', body)
+      });
 
       if (response.ok) {
         await store.recordKeySuccess(target.keyId);
@@ -49,11 +63,13 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
       const failure = classifyUpstreamFailure(response.status, body.toString('utf8'));
       if (failure === 'exhausted') {
         await store.markKeyExhausted(target.keyId, summarizeError(response.status, body));
+        debugLog(request.debug, 'proxy.key_exhausted', { target: compactTarget(target), status: response.status });
         lastResult = { status: response.status, headers, body, target: compactTarget(target) };
         continue;
       }
       if (failure === 'retryable') {
         await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
+        debugLog(request.debug, 'proxy.retryable_failure', { target: compactTarget(target), status: response.status });
         lastResult = { status: response.status, headers, body, target: compactTarget(target) };
         continue;
       }
@@ -62,6 +78,7 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
       return { status: response.status, headers, body, target: compactTarget(target) };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      debugLog(request.debug, 'proxy.upstream_error', { target: compactTarget(target), error: lastError.message });
       await store.recordKeyFailure(target.keyId, lastError.message);
       continue;
     }
@@ -81,7 +98,9 @@ export async function directCompatibleRequest(store: Store, request: ProxyReques
     throw Object.assign(new Error('Selected API key service group is not enabled'), { statusCode: 400 });
   }
   const baseUrl = request.protocol === 'openai' ? group.openaiBaseUrl : group.anthropicBaseUrl;
-  const response = await fetch(resolveUpstreamUrl(baseUrl, request.path, request.protocol), {
+  const url = resolveUpstreamUrl(baseUrl, request.path, request.protocol);
+  debugLog(request.debug, 'proxy.direct_attempt', { url: safeUrl(url), target: { groupCode: key.groupCode, keyId: key.id, maskedKey: key.maskedKey } });
+  const response = await fetch(url, {
     method: request.method,
     headers: upstreamHeaders(request.protocol, request.headers, key.apiKey, request.body.length),
     body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(request.body),
@@ -89,6 +108,7 @@ export async function directCompatibleRequest(store: Store, request: ProxyReques
   });
   const body = Buffer.from(await response.arrayBuffer());
   const headers = headersObject(response.headers);
+  debugLog(request.debug, 'proxy.direct_response', { status: response.status, ok: response.ok, target: { groupCode: key.groupCode, keyId: key.id, maskedKey: key.maskedKey }, ...debugBody('responseBody', body) });
   if (response.ok) {
     await store.recordKeySuccess(key.id);
   } else {
@@ -105,12 +125,18 @@ export async function directCompatibleRequest(store: Store, request: ProxyReques
 export async function prepareStreamingProxy(store: Store, request: ProxyRequest): Promise<Response & { targetMeta?: { groupCode: string; keyId: number; maskedKey: string } }> {
   const plan = await buildRoutePlan(store, request.protocol);
   if (plan.length === 0) throw new NoAvailableKeysError();
+  debugLog(request.debug, 'proxy.stream_route_plan', { candidateCount: plan.length });
 
   let lastResponse: Response | null = null;
   let lastError: Error | null = null;
 
   for (const target of plan) {
     const url = resolveUpstreamUrl(target.baseUrl, request.path, request.protocol);
+    debugLog(request.debug, 'proxy.stream_upstream_attempt', {
+      url: safeUrl(url),
+      target: compactTarget(target),
+      ...debugBody('requestBody', request.body)
+    });
     try {
       const response = await fetch(url, {
         method: request.method,
@@ -122,18 +148,27 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
       if (response.ok) {
         await store.recordKeySuccess(target.keyId);
         response.targetMeta = compactTarget(target);
+        debugLog(request.debug, 'proxy.stream_upstream_open', { status: response.status, target: compactTarget(target) });
         return response;
       }
 
       const preview = Buffer.from(await response.clone().arrayBuffer());
+      debugLog(request.debug, 'proxy.stream_upstream_response', {
+        status: response.status,
+        ok: false,
+        target: compactTarget(target),
+        ...debugBody('responseBody', preview)
+      });
       const failure = classifyUpstreamFailure(response.status, preview.toString('utf8'));
       if (failure === 'exhausted') {
         await store.markKeyExhausted(target.keyId, summarizeError(response.status, preview));
+        debugLog(request.debug, 'proxy.stream_key_exhausted', { target: compactTarget(target), status: response.status });
         lastResponse = response;
         continue;
       }
       if (failure === 'retryable') {
         await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
+        debugLog(request.debug, 'proxy.stream_retryable_failure', { target: compactTarget(target), status: response.status });
         lastResponse = response;
         continue;
       }
@@ -143,6 +178,7 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
       return response;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      debugLog(request.debug, 'proxy.stream_upstream_error', { target: compactTarget(target), error: lastError.message });
       await store.recordKeyFailure(target.keyId, lastError.message);
       continue;
     }
@@ -196,4 +232,8 @@ function summarizeError(status: number, body: Buffer): string {
 
 function compactTarget(target: { groupCode: string; keyId: number; maskedKey: string }) {
   return { groupCode: target.groupCode, keyId: target.keyId, maskedKey: target.maskedKey };
+}
+
+function safeUrl(url: URL): string {
+  return `${url.origin}${url.pathname}`;
 }

@@ -1,4 +1,5 @@
 import { proxyCompatibleRequest, type ProxyRequest, type ProxyResult } from './proxy.ts';
+import { debugLog, type DebugContext } from './debug.ts';
 import type { Store } from './types.ts';
 
 type ResponsesRequest = {
@@ -35,10 +36,15 @@ type ResponseHistory = {
 const responseHistories = new Map<string, ResponseHistory>();
 const maxResponseHistories = 200;
 
-export async function proxyResponsesViaChatCompletions(store: Store, body: Buffer, headers: Record<string, string | string[] | undefined>): Promise<ProxyResult> {
+export async function proxyResponsesViaChatCompletions(store: Store, body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): Promise<ProxyResult> {
   const request = parseResponsesRequest(body);
   const chatPayload = responsesToChatPayload(request);
-  const result = await proxyCompatibleRequest(store, responsesChatProxyRequestFromPayload(chatPayload, headers));
+  debugLog(debug, 'responses.compat_request', {
+    chatMessageCount: chatPayload.messages.length,
+    hasPreviousResponse: Boolean(request.previous_response_id),
+    toolCount: request.tools?.length ?? 0
+  });
+  const result = await proxyCompatibleRequest(store, { ...responsesChatProxyRequestFromPayload(chatPayload, headers), debug });
 
   if (result.status < 200 || result.status >= 300) return result;
 
@@ -53,6 +59,12 @@ export async function proxyResponsesViaChatCompletions(store: Store, body: Buffe
   const chatBody = parseJson(result.body);
   const response = chatCompletionToResponse(chatBody, request.model ?? chatPayload.model);
   rememberResponse(response.id, chatPayload.messages, response.output);
+  debugLog(debug, 'responses.compat_response', {
+    responseId: response.id,
+    status: response.status,
+    outputCount: response.output.length,
+    outputTextBytes: Buffer.byteLength(response.output_text ?? '')
+  });
   return {
     ...result,
     headers: { ...result.headers, 'content-type': 'application/json' },
@@ -68,13 +80,19 @@ export function isStreamingResponsesRequest(body: Buffer): boolean {
   }
 }
 
-export function responsesChatProxyRequest(body: Buffer, headers: Record<string, string | string[] | undefined>): ProxyRequest & { fallbackModel: string; chatMessages: ChatMessage[] } {
+export function responsesChatProxyRequest(body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): ProxyRequest & { fallbackModel: string; chatMessages: ChatMessage[] } {
   const request = parseResponsesRequest(body);
   const chatPayload = responsesToChatPayload(request);
+  debugLog(debug, 'responses.stream_compat_request', {
+    chatMessageCount: chatPayload.messages.length,
+    hasPreviousResponse: Boolean(request.previous_response_id),
+    toolCount: request.tools?.length ?? 0
+  });
   return {
     ...responsesChatProxyRequestFromPayload(chatPayload, headers),
     fallbackModel: request.model ?? chatPayload.model,
-    chatMessages: chatPayload.messages
+    chatMessages: chatPayload.messages,
+    debug
   };
 }
 
@@ -98,7 +116,7 @@ function chatSseToResponsesSse(body: Buffer, fallbackModel: string): string {
   return transformer.transform(body) + transformer.flush();
 }
 
-export function createResponsesSseTransformer(fallbackModel: string, options: { requestMessages?: ChatMessage[] } = {}) {
+export function createResponsesSseTransformer(fallbackModel: string, options: { requestMessages?: ChatMessage[]; debug?: DebugContext } = {}) {
   const created = Math.floor(Date.now() / 1000);
   const itemId = `msg_${created}`;
   let responseId = `resp_${created}`;
@@ -113,6 +131,10 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
   let completed = false;
   let failed = false;
   let finalFinishReason = '';
+  let upstreamChunks = 0;
+  let upstreamEvents = 0;
+  let outputTextDeltas = 0;
+  let outputTextBytes = 0;
   const nativeToolCalls = new Map<number, ChatToolCall>();
 
   function ensureInitialized(): string {
@@ -214,6 +236,16 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
     }
     const finalStatus = finalFinishReason === 'length' ? 'incomplete' : 'completed';
     const finalEvent = finalStatus === 'incomplete' ? 'response.incomplete' : 'response.completed';
+    debugLog(options.debug, 'responses.stream_complete', {
+      responseId,
+      finalStatus,
+      finalFinishReason,
+      upstreamChunks,
+      upstreamEvents,
+      outputTextDeltas,
+      outputTextBytes,
+      toolCallCount: toolCalls.length
+    });
     return [
       out,
       sse({
@@ -228,6 +260,14 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
     if (completed || failed) return '';
     failed = true;
     const message = error instanceof Error ? error.message : String(error);
+    debugLog(options.debug, 'responses.stream_failed', {
+      responseId,
+      upstreamChunks,
+      upstreamEvents,
+      outputTextDeltas,
+      outputTextBytes,
+      error: message
+    });
     return [
       ensureInitialized(),
       sse({
@@ -276,15 +316,30 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
             arguments: existing.function.arguments + (callDelta.function?.arguments ?? '')
           }
         });
+        debugLog(options.debug, 'responses.stream_tool_delta', {
+          responseId,
+          toolIndex: index,
+          toolCallId: nativeToolCalls.get(index)?.id,
+          name: nativeToolCalls.get(index)?.function.name,
+          argumentsBytes: Buffer.byteLength(nativeToolCalls.get(index)?.function.arguments ?? '')
+        });
       }
       for (const call of choice.message?.tool_calls ?? []) {
         nativeToolCalls.set(nativeToolCalls.size, normalizeChatToolCall(call, nativeToolCalls.size, created));
+        debugLog(options.debug, 'responses.stream_tool_message', {
+          responseId,
+          toolCallId: call.id,
+          name: call.function?.name,
+          argumentsBytes: Buffer.byteLength(call.function?.arguments ?? '')
+        });
       }
       const delta = choice.delta?.content ?? choice.message?.content ?? '';
       if (delta) {
         rawText += delta;
         if (!delta.includes('<tool_call>') && !rawText.includes('<tool_call>')) {
           outputText += delta;
+          outputTextDeltas += 1;
+          outputTextBytes += Buffer.byteLength(delta);
           out += ensureTextItem();
           out += sse({
             type: 'response.output_text.delta',
@@ -298,6 +353,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
       }
       if (choice.finish_reason) {
         finalFinishReason = choice.finish_reason;
+        debugLog(options.debug, 'responses.stream_finish_reason', { responseId, finishReason: choice.finish_reason });
         out += complete();
       }
     }
@@ -307,12 +363,14 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
   return {
     transform(chunk: Buffer | Uint8Array): string {
       if (completed || failed) return '';
+      upstreamChunks += 1;
       buffer += Buffer.from(chunk).toString('utf8');
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
       let out = '';
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
+        upstreamEvents += 1;
         out += handlePayload(line.slice(5).trim());
       }
       return out;

@@ -5,6 +5,7 @@ import { listAdminModels, sendAdminChat, type ChatRequest } from './chat.ts';
 import { readBody, readJson, sendError, sendJson, sendText } from './http.ts';
 import { NoAvailableKeysError, prepareStreamingProxy, proxyCompatibleRequest } from './proxy.ts';
 import { createResponsesSseTransformer, isStreamingResponsesRequest, proxyResponsesViaChatCompletions, responsesChatProxyRequest } from './responses-compat.ts';
+import { createDebugContext, debugBody, debugLog } from './debug.ts';
 import type { KeyStatus, Protocol, Store } from './types.ts';
 
 export type ServerOptions = {
@@ -131,13 +132,16 @@ async function handleAdmin(store: Store, req: IncomingMessage, res: ServerRespon
 
 async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
   const body = req.method === 'GET' || req.method === 'HEAD' ? Buffer.alloc(0) : await readBody(req);
+  const debug = createDebugContext(protocol, req.method ?? 'POST', path, body);
+  debugLog(debug, 'proxy.request_start', { ...debugBody('requestBody', body) });
   if (protocol === 'openai' && path === '/v1/responses' && req.method === 'POST') {
     if (isStreamingResponsesRequest(body)) {
-      return handleResponsesStreamingProxy(store, body, req, res);
+      return handleResponsesStreamingProxy(store, body, req, res, debug);
     }
-    const result = await proxyResponsesViaChatCompletions(store, body, req.headers);
+    const result = await proxyResponsesViaChatCompletions(store, body, req.headers, debug);
     res.writeHead(result.status, responseHeaders(result.headers));
     res.end(result.body);
+    debugLog(debug, 'proxy.request_end', { status: result.status, target: result.target, ...debugBody('responseBody', result.body) });
     return;
   }
   const wantsStream = bodyIncludesStreamTrue(body);
@@ -146,7 +150,8 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
     method: req.method ?? 'POST',
     path,
     headers: req.headers,
-    body
+    body,
+    debug
   };
 
   try {
@@ -158,20 +163,29 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
         return;
       }
       const reader = upstream.body.getReader();
+      let chunks = 0;
+      let bytes = 0;
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (value) res.write(Buffer.from(value));
+        if (value) {
+          chunks += 1;
+          bytes += value.byteLength;
+          res.write(Buffer.from(value));
+        }
       }
       res.end();
+      debugLog(debug, 'proxy.stream_request_end', { status: upstream.status, target: upstream.targetMeta, chunks, bytes });
       return;
     }
 
     const result = await proxyCompatibleRequest(store, proxyRequest);
     res.writeHead(result.status, responseHeaders(result.headers));
     res.end(result.body);
+    debugLog(debug, 'proxy.request_end', { status: result.status, target: result.target, ...debugBody('responseBody', result.body) });
     return;
   } catch (error) {
+    debugLog(debug, 'proxy.request_error', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof NoAvailableKeysError) {
       return sendJson(res, 503, { error: { message: error.message } });
     }
@@ -179,9 +193,9 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
   }
 }
 
-async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: IncomingMessage, res: ServerResponse, debug = createDebugContext('openai', req.method ?? 'POST', '/v1/responses', body)): Promise<void> {
   try {
-    const proxyRequest = responsesChatProxyRequest(body, req.headers);
+    const proxyRequest = responsesChatProxyRequest(body, req.headers, debug);
     const upstream = await prepareStreamingProxy(store, proxyRequest);
     if (!upstream.ok) {
       res.writeHead(upstream.status, responseHeaders(upstream.headers));
@@ -191,6 +205,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       }
       const errorBody = Buffer.from(await upstream.arrayBuffer());
       res.end(errorBody);
+      debugLog(debug, 'responses.stream_non_ok_end', { status: upstream.status, target: upstream.targetMeta, ...debugBody('responseBody', errorBody) });
       return;
     }
     res.writeHead(upstream.status, {
@@ -203,24 +218,42 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       res.end();
       return;
     }
-    const transformer = createResponsesSseTransformer(proxyRequest.fallbackModel, { requestMessages: proxyRequest.chatMessages });
+    const transformer = createResponsesSseTransformer(proxyRequest.fallbackModel, { requestMessages: proxyRequest.chatMessages, debug });
     const reader = upstream.body.getReader();
+    let downstreamChunks = 0;
+    let downstreamBytes = 0;
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         if (value) {
           const converted = transformer.transform(value);
-          if (converted) res.write(converted);
+          if (converted) {
+            downstreamChunks += 1;
+            downstreamBytes += Buffer.byteLength(converted);
+            res.write(converted);
+          }
         }
       }
-      res.write(transformer.flush());
+      const tail = transformer.flush();
+      if (tail) {
+        downstreamChunks += 1;
+        downstreamBytes += Buffer.byteLength(tail);
+        res.write(tail);
+      }
     } catch (error) {
       console.error('responses stream interrupted:', error);
-      res.write(transformer.fail(error));
+      const failure = transformer.fail(error);
+      if (failure) {
+        downstreamChunks += 1;
+        downstreamBytes += Buffer.byteLength(failure);
+        res.write(failure);
+      }
     }
     res.end();
+    debugLog(debug, 'responses.stream_request_end', { status: upstream.status, target: upstream.targetMeta, downstreamChunks, downstreamBytes });
   } catch (error) {
+    debugLog(debug, 'responses.stream_request_error', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof NoAvailableKeysError) {
       return sendJson(res, 503, { error: { message: error.message } });
     }
