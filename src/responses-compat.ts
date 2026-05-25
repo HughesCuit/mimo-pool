@@ -32,10 +32,12 @@ type ChatMessage = {
 
 type ResponseHistory = {
   messages: ChatMessage[];
+  expiresAt: number;
 };
 
 const responseHistories = new Map<string, ResponseHistory>();
 const maxResponseHistories = 200;
+const defaultResponseSessionTtlMs = 60 * 60 * 1000;
 
 export async function proxyResponsesViaChatCompletions(store: Store, body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): Promise<ProxyResult> {
   const request = parseResponsesRequest(body);
@@ -145,6 +147,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
   let outputTextDeltas = 0;
   let outputTextBytes = 0;
   const nativeToolCalls = new Map<number, ChatToolCall>();
+  const streamedToolCalls = new Map<number, { outputIndex: number; itemId: string; call: ChatToolCall; added: boolean }>();
 
   function ensureInitialized(): string {
     if (initialized) return '';
@@ -214,31 +217,35 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
       ].join('');
     }
     for (const call of toolCalls) {
-      const item = functionCallItem(`fc_${created}_${outputIndex}`, call);
+      const existingStreamed = call.callId ? [...streamedToolCalls.values()].find((item) => item.call.id === call.callId) : undefined;
+      const toolOutputIndex = existingStreamed?.outputIndex ?? outputIndex;
+      const item = functionCallItem(existingStreamed?.itemId ?? `fc_${created}_${toolOutputIndex}`, call);
       outputItems.push(item);
-      out += sse({
-        type: 'response.output_item.added',
-        output_index: outputIndex,
-        item: { ...item, status: 'in_progress', arguments: '' }
-      });
-      out += sse({
-        type: 'response.function_call_arguments.delta',
-        item_id: item.id,
-        output_index: outputIndex,
-        delta: item.arguments
-      });
+      if (!existingStreamed?.added) {
+        out += sse({
+          type: 'response.output_item.added',
+          output_index: toolOutputIndex,
+          item: { ...item, status: 'in_progress', arguments: '' }
+        });
+        out += sse({
+          type: 'response.function_call_arguments.delta',
+          item_id: item.id,
+          output_index: toolOutputIndex,
+          delta: item.arguments
+        });
+      }
       out += sse({
         type: 'response.function_call_arguments.done',
         item_id: item.id,
-        output_index: outputIndex,
+        output_index: toolOutputIndex,
         arguments: item.arguments
       });
       out += sse({
         type: 'response.output_item.done',
-        output_index: outputIndex,
+        output_index: toolOutputIndex,
         item
       });
-      outputIndex += 1;
+      outputIndex = Math.max(outputIndex, toolOutputIndex + 1);
     }
     if (options.requestMessages) {
       rememberResponse(responseId, options.requestMessages, outputItems);
@@ -326,6 +333,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
             arguments: existing.function.arguments + (callDelta.function?.arguments ?? '')
           }
         });
+        out += emitToolCallDelta(index, callDelta);
         debugLog(options.debug, 'responses.stream_tool_delta', {
           responseId,
           toolIndex: index,
@@ -335,7 +343,10 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
         });
       }
       for (const call of choice.message?.tool_calls ?? []) {
-        nativeToolCalls.set(nativeToolCalls.size, normalizeChatToolCall(call, nativeToolCalls.size, created));
+        const index = nativeToolCalls.size;
+        const normalized = normalizeChatToolCall(call, index, created);
+        nativeToolCalls.set(index, normalized);
+        out += emitWholeToolCall(index, normalized);
         debugLog(options.debug, 'responses.stream_tool_message', {
           responseId,
           toolCallId: call.id,
@@ -368,6 +379,85 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
       }
     }
     return out;
+  }
+
+  function emitToolCallDelta(index: number, callDelta: { id?: string; function?: { name?: string; arguments?: string } }): string {
+    const call = nativeToolCalls.get(index);
+    if (!call) return '';
+    const state = ensureStreamedToolState(index, call, callDelta.function?.name);
+    let out = '';
+    if (!state.added) {
+      state.added = true;
+      out += sse({
+        type: 'response.output_item.added',
+        output_index: state.outputIndex,
+        item: {
+          id: state.itemId,
+          type: 'function_call',
+          status: 'in_progress',
+          call_id: call.id,
+          name: call.function.name,
+          arguments: ''
+        }
+      });
+    }
+    const delta = callDelta.function?.arguments ?? '';
+    if (delta) {
+      out += sse({
+        type: 'response.function_call_arguments.delta',
+        item_id: state.itemId,
+        output_index: state.outputIndex,
+        delta
+      });
+    }
+    return out;
+  }
+
+  function emitWholeToolCall(index: number, call: ChatToolCall): string {
+    const state = ensureStreamedToolState(index, call, call.function.name);
+    let out = '';
+    if (!state.added) {
+      state.added = true;
+      out += sse({
+        type: 'response.output_item.added',
+        output_index: state.outputIndex,
+        item: {
+          id: state.itemId,
+          type: 'function_call',
+          status: 'in_progress',
+          call_id: call.id,
+          name: call.function.name,
+          arguments: ''
+        }
+      });
+    }
+    if (call.function.arguments) {
+      out += sse({
+        type: 'response.function_call_arguments.delta',
+        item_id: state.itemId,
+        output_index: state.outputIndex,
+        delta: call.function.arguments
+      });
+    }
+    return out;
+  }
+
+  function ensureStreamedToolState(index: number, call: ChatToolCall, name?: string) {
+    const existing = streamedToolCalls.get(index);
+    if (existing) {
+      if (name) existing.call.function.name = name;
+      existing.call = call;
+      return existing;
+    }
+    const state = {
+      outputIndex: textItemStarted ? outputIndex++ : outputIndex,
+      itemId: `fc_${created}_${index}`,
+      call,
+      added: false
+    };
+    if (!textItemStarted) outputIndex += 1;
+    streamedToolCalls.set(index, state);
+    return state;
   }
 
   return {
@@ -589,11 +679,35 @@ function responseOutputItems(messageId: string, outputText: string, toolCalls: P
 function rememberResponse(responseId: string, requestMessages: ChatMessage[], output: unknown[]): void {
   const assistant = assistantMessageFromOutput(output);
   if (!assistant) return;
-  responseHistories.set(responseId, { messages: [...requestMessages, assistant] });
+  pruneResponseHistories();
+  responseHistories.set(responseId, { messages: [...requestMessages, assistant], expiresAt: Date.now() + responseSessionTtlMs() });
   while (responseHistories.size > maxResponseHistories) {
     const oldest = responseHistories.keys().next().value;
     if (!oldest) break;
     responseHistories.delete(oldest);
+  }
+}
+
+function responseSessionTtlMs(): number {
+  const ttl = Number(process.env.RESPONSES_SESSION_TTL_MS ?? defaultResponseSessionTtlMs);
+  return Number.isFinite(ttl) && ttl > 0 ? ttl : defaultResponseSessionTtlMs;
+}
+
+function historyMessages(responseId: string): ChatMessage[] {
+  pruneResponseHistories();
+  const history = responseHistories.get(responseId);
+  if (!history) return [];
+  if (history.expiresAt <= Date.now()) {
+    responseHistories.delete(responseId);
+    return [];
+  }
+  return history.messages;
+}
+
+function pruneResponseHistories(): void {
+  const now = Date.now();
+  for (const [id, history] of responseHistories) {
+    if (history.expiresAt <= now) responseHistories.delete(id);
   }
 }
 
@@ -650,8 +764,17 @@ function toolChoiceForChat(toolChoice: unknown): Record<string, unknown> {
   if (typeof toolChoice === 'string') return { tool_choice: toolChoice };
   if (!toolChoice || typeof toolChoice !== 'object') return {};
   const record = toolChoice as { type?: unknown; name?: unknown; function?: { name?: unknown } };
+  if (record.function && typeof record.function.name === 'string') {
+    return { tool_choice: { type: 'function', function: { name: record.function.name } } };
+  }
   if (record.type === 'function' && typeof record.name === 'string') {
     return { tool_choice: { type: 'function', function: { name: record.name } } };
+  }
+  if (record.type === 'auto' || record.type === 'none') {
+    return { tool_choice: record.type };
+  }
+  if (record.type === 'required' || record.type === 'tool' || record.type === 'any' || record.type === 'function') {
+    return { tool_choice: 'required' };
   }
   return { tool_choice: toolChoice };
 }
@@ -697,9 +820,9 @@ function responsesToChatPayload(request: ResponsesRequest) {
     messages.push({ role: 'system', content: request.instructions });
   }
   if (request.previous_response_id) {
-    messages.push(...(responseHistories.get(request.previous_response_id)?.messages ?? []));
+    messages.push(...historyMessages(request.previous_response_id));
   }
-  messages.push(...inputToMessages(request.input));
+  messages.push(...mergeConsecutiveAssistantToolCalls(inputToMessages(request.input)));
   if (request.messages?.length) {
     messages.push(...request.messages.map((message) => ({
       role: normalizeRole(message.role),
@@ -721,6 +844,26 @@ function responsesToChatPayload(request: ResponsesRequest) {
     ...toolChoiceForChat(request.tool_choice),
     ...toolsForChat(request.tools)
   };
+}
+
+function mergeConsecutiveAssistantToolCalls(messages: ChatMessage[]): ChatMessage[] {
+  const merged: ChatMessage[] = [];
+  for (const message of messages) {
+    const previous = merged.at(-1);
+    if (
+      previous?.role === 'assistant' &&
+      previous.content === null &&
+      Array.isArray(previous.tool_calls) &&
+      message.role === 'assistant' &&
+      message.content === null &&
+      Array.isArray(message.tool_calls)
+    ) {
+      previous.tool_calls.push(...message.tool_calls);
+      continue;
+    }
+    merged.push(message);
+  }
+  return merged;
 }
 
 function inputToMessages(input: unknown): ChatMessage[] {

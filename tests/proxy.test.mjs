@@ -463,6 +463,61 @@ test('app converts Mimo XML tool calls into Responses function_call stream items
   }
 });
 
+test('streaming responses converts native chat tool deltas before completion', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const target = await upstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end([
+        'data:{"id":"chatcmpl-native-delta","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_delta_1","type":"function","function":{"name":"exec","arguments":"{\\"command\\""}}]}}]}',
+        '',
+        'data:{"id":"chatcmpl-native-delta","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"pwd\\"}"}}]}}]}',
+        '',
+        'data:{"id":"chatcmpl-native-delta","model":"mimo-v2.5-pro","choices":[{"index":0,"finish_reason":"tool_calls"}]}',
+        '',
+        'data:[DONE]',
+        ''
+      ].join('\n'));
+    });
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['native-delta-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          input: 'where',
+          stream: true,
+          tools: [{ type: 'function', name: 'exec', parameters: { type: 'object' } }]
+        })
+      });
+      const text = await response.text();
+      const addedIndex = text.indexOf('response.output_item.added');
+      const deltaIndex = text.indexOf('response.function_call_arguments.delta');
+      const doneIndex = text.indexOf('response.function_call_arguments.done');
+
+      assert.equal(response.status, 200);
+      assert.ok(addedIndex >= 0);
+      assert.ok(deltaIndex > addedIndex);
+      assert.ok(doneIndex > deltaIndex);
+      assert.match(text, /"call_id":"call_delta_1"/);
+      assert.match(text, /"arguments":"{\\"command\\":\\"pwd\\"}"/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
 test('responses adapter forwards tools and continues tool calls with function_call_output', async () => {
   const { createApp } = await import('../src/server.ts');
   const observedPayloads = [];
@@ -513,6 +568,7 @@ test('responses adapter forwards tools and continues tool calls with function_ca
         body: JSON.stringify({
           model: 'mimo-v2.5-pro',
           input: 'check project',
+          tool_choice: { type: 'tool' },
           tools: [{
             type: 'function',
             name: 'exec',
@@ -563,6 +619,7 @@ test('responses adapter forwards tools and continues tool calls with function_ca
           }
         }
       }]);
+      assert.equal(observedPayloads[0].tool_choice, 'required');
       assert.equal(second.status, 200);
       assert.deepEqual(observedPayloads[1].messages, [
         { role: 'user', content: 'check project' },
@@ -574,6 +631,49 @@ test('responses adapter forwards tools and continues tool calls with function_ca
         { role: 'tool', tool_call_id: 'call_native_1', content: 'package.json\nsrc' }
       ]);
       assert.equal(secondBody.output_text, 'saw files');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
+test('responses adapter standardizes tool_choice function objects', async () => {
+  const { createApp } = await import('../src/server.ts');
+  let observedPayload = null;
+  const target = await upstream(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-tool-choice',
+      model: observedPayload.model,
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['tool-choice-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          input: 'use exec',
+          tool_choice: { type: 'function', function: { name: 'exec' } },
+          tools: [{ type: 'function', name: 'exec', parameters: { type: 'object' } }]
+        })
+      });
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(observedPayload.tool_choice, { type: 'function', function: { name: 'exec' } });
     } finally {
       await server.close();
     }
@@ -612,7 +712,9 @@ test('responses adapter converts full input function_call history without previo
           input: [
             { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect project' }] },
             { type: 'function_call', call_id: 'call_exec_1', name: 'exec', arguments: '{"command":"ls -la"}' },
+            { type: 'function_call', call_id: 'call_exec_2', name: 'exec', arguments: '{"command":"pwd"}' },
             { type: 'function_call_output', call_id: 'call_exec_1', output: 'package.json\nsrc' },
+            { type: 'function_call_output', call_id: 'call_exec_2', output: '/repo' },
             { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }] }
           ],
           tools: [{ type: 'function', name: 'exec', parameters: { type: 'object' } }]
@@ -627,8 +729,13 @@ test('responses adapter converts full input function_call history without previo
           id: 'call_exec_1',
           type: 'function',
           function: { name: 'exec', arguments: '{"command":"ls -la"}' }
+        }, {
+          id: 'call_exec_2',
+          type: 'function',
+          function: { name: 'exec', arguments: '{"command":"pwd"}' }
         }] },
         { role: 'tool', tool_call_id: 'call_exec_1', content: 'package.json\nsrc' },
+        { role: 'tool', tool_call_id: 'call_exec_2', content: '/repo' },
         { role: 'user', content: 'continue' }
       ]);
       assert.equal(body.output_text, 'continued after tool');
