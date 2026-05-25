@@ -1229,6 +1229,7 @@ test('debug mode logs proxy request flow without leaking raw API keys', async ()
       assert.match(text, /proxy\.request_start/);
       assert.match(text, /proxy\.upstream_attempt/);
       assert.match(text, /responses\.compat_response/);
+      assert.match(text, /topLevelKeys/);
       assert.match(text, /tp-d\.\.\.3456/);
       assert.doesNotMatch(text, /tp-debug-secret-key-123456/);
       assert.doesNotMatch(text, /Bearer proxy-secret/);
