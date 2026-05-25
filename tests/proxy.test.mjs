@@ -682,6 +682,56 @@ test('responses adapter standardizes tool_choice function objects', async () => 
   }
 });
 
+test('responses adapter can add an optional tool-use nudge for Codex-style requests', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const previousNudge = process.env.RESPONSES_TOOL_NUDGE;
+  process.env.RESPONSES_TOOL_NUDGE = '1';
+  let observedPayload = null;
+  const target = await upstream(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-tool-nudge',
+      model: observedPayload.model,
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['tool-nudge-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          instructions: 'You are Codex.',
+          input: 'inspect the project',
+          tools: [{ type: 'function', name: 'exec_command', parameters: { type: 'object' } }]
+        })
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(observedPayload.messages[0].content, 'You are Codex.');
+      assert.equal(observedPayload.messages[1].role, 'system');
+      assert.match(observedPayload.messages[1].content, /call the provided tool/);
+      assert.equal(observedPayload.messages[2].content, 'inspect the project');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (previousNudge === undefined) delete process.env.RESPONSES_TOOL_NUDGE;
+    else process.env.RESPONSES_TOOL_NUDGE = previousNudge;
+    await target.close();
+  }
+});
+
 test('responses adapter converts full input function_call history without previous_response_id', async () => {
   const { createApp } = await import('../src/server.ts');
   let observedPayload = null;

@@ -1,5 +1,5 @@
 import { proxyCompatibleRequest, type ProxyRequest, type ProxyResult } from './proxy.ts';
-import { debugLog, type DebugContext } from './debug.ts';
+import { debugBody, debugLog, type DebugContext } from './debug.ts';
 import { applyModelAlias, restoreModelAlias } from './model-alias.ts';
 import type { Store } from './types.ts';
 
@@ -67,7 +67,8 @@ export async function proxyResponsesViaChatCompletions(store: Store, body: Buffe
     responseId: response.id,
     status: response.status,
     outputCount: response.output.length,
-    outputTextBytes: Buffer.byteLength(response.output_text ?? '')
+    outputTextBytes: Buffer.byteLength(response.output_text ?? ''),
+    ...debugBody('outputText', response.output_text ?? '')
   });
   return {
     ...result,
@@ -260,8 +261,16 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
       upstreamEvents,
       outputTextDeltas,
       outputTextBytes,
-      toolCallCount: toolCalls.length
+      toolCallCount: toolCalls.length,
+      ...debugBody('outputText', outputText)
     });
+    if (options.debug?.toolCount && options.debug.toolCount > 0 && finalFinishReason === 'stop' && toolCalls.length === 0) {
+      debugLog(options.debug, 'responses.completed_without_tool_calls', {
+        responseId,
+        outputTextBytes,
+        ...debugBody('outputText', outputText)
+      });
+    }
     return [
       out,
       sse({
@@ -819,6 +828,9 @@ function responsesToChatPayload(request: ResponsesRequest) {
   if (request.instructions) {
     messages.push({ role: 'system', content: request.instructions });
   }
+  if (shouldAddToolNudge(request)) {
+    messages.push({ role: 'system', content: toolNudgeInstruction() });
+  }
   if (request.previous_response_id) {
     messages.push(...historyMessages(request.previous_response_id));
   }
@@ -844,6 +856,20 @@ function responsesToChatPayload(request: ResponsesRequest) {
     ...toolChoiceForChat(request.tool_choice),
     ...toolsForChat(request.tools)
   };
+}
+
+function shouldAddToolNudge(request: ResponsesRequest): boolean {
+  if (!request.tools?.length) return false;
+  const value = process.env.RESPONSES_TOOL_NUDGE ?? '0';
+  return value === '1' || value === 'true';
+}
+
+function toolNudgeInstruction(): string {
+  return [
+    'Tool-use compatibility instruction:',
+    'When the user asks you to inspect files, run commands, edit code, test, search the workspace, or otherwise act on the project, call the provided tool instead of only describing what you would do.',
+    'Use the tool_calls/function_call interface provided by the API. Do not print XML, JSON, or pseudo tool calls as plain text.'
+  ].join(' ');
 }
 
 function mergeConsecutiveAssistantToolCalls(messages: ChatMessage[]): ChatMessage[] {
