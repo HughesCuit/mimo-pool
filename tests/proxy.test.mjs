@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createMemoryStore } from '../src/store.ts';
 import { proxyCompatibleRequest } from '../src/proxy.ts';
 
@@ -707,8 +710,12 @@ test('debug mode logs proxy request flow without leaking raw API keys', async ()
   const { createApp } = await import('../src/server.ts');
   const previousDebug = process.env.DEBUG_PROXY;
   const previousBody = process.env.DEBUG_PROXY_BODY;
+  const previousLogFile = process.env.DEBUG_PROXY_LOG_FILE;
+  const tempDir = mkdtempSync(join(tmpdir(), 'mimo-pool-debug-'));
+  const logFile = join(tempDir, 'proxy.log');
   process.env.DEBUG_PROXY = '1';
   process.env.DEBUG_PROXY_BODY = '1';
+  process.env.DEBUG_PROXY_LOG_FILE = logFile;
   const logs = [];
   const originalError = console.error;
   console.error = (...args) => {
@@ -739,7 +746,8 @@ test('debug mode logs proxy request flow without leaking raw API keys', async ()
         body: JSON.stringify({ model: 'mimo-v2.5-pro', input: 'hello', stream: false })
       });
       await response.text();
-      const text = logs.join('\n');
+      const text = readFileSync(logFile, 'utf8');
+      const consoleText = logs.join('\n');
 
       assert.equal(response.status, 200);
       assert.match(text, /\[mimo-pool:debug\]/);
@@ -749,6 +757,7 @@ test('debug mode logs proxy request flow without leaking raw API keys', async ()
       assert.match(text, /tp-d\.\.\.3456/);
       assert.doesNotMatch(text, /tp-debug-secret-key-123456/);
       assert.doesNotMatch(text, /Bearer proxy-secret/);
+      assert.doesNotMatch(consoleText, /\[mimo-pool:debug\].*proxy\.request_start/);
     } finally {
       await server.close();
     }
@@ -758,6 +767,9 @@ test('debug mode logs proxy request flow without leaking raw API keys', async ()
     else process.env.DEBUG_PROXY = previousDebug;
     if (previousBody === undefined) delete process.env.DEBUG_PROXY_BODY;
     else process.env.DEBUG_PROXY_BODY = previousBody;
+    if (previousLogFile === undefined) delete process.env.DEBUG_PROXY_LOG_FILE;
+    else process.env.DEBUG_PROXY_LOG_FILE = previousLogFile;
+    rmSync(tempDir, { recursive: true, force: true });
     await target.close();
   }
 });

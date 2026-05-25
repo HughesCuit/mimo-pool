@@ -1,3 +1,5 @@
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { Protocol } from './types.ts';
 
 export type DebugContext = {
@@ -15,6 +17,7 @@ export type DebugContext = {
 };
 
 let nextRequestId = 1;
+let announcedLogFile = '';
 
 export function debugEnabled(): boolean {
   return process.env.DEBUG_PROXY === '1' || process.env.DEBUG_PROXY === 'true';
@@ -58,7 +61,18 @@ export function debugLog(context: DebugContext | undefined, event: string, detai
     toolCount: context.toolCount,
     ...details
   });
-  console.error(`[mimo-pool:debug] ${JSON.stringify(payload)}`);
+  const line = `[mimo-pool:debug] ${JSON.stringify(payload)}`;
+  const logFile = process.env.DEBUG_PROXY_LOG_FILE;
+  if (logFile) {
+    mkdirSync(dirname(logFile), { recursive: true });
+    appendFileSync(logFile, `${line}\n`, 'utf8');
+    if (announcedLogFile !== logFile) {
+      announcedLogFile = logFile;
+      console.error(`[mimo-pool:debug] writing debug logs to ${logFile}`);
+    }
+    return;
+  }
+  console.error(line);
 }
 
 export function debugBody(label: string, body: Buffer | string): Record<string, unknown> {

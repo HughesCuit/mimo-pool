@@ -36,7 +36,7 @@ npm.cmd start
 npm.cmd run debug
 ```
 
-默认只输出元数据和脱敏后的 key。需要查看截断正文时可以额外设置：
+默认写入 `logs/mimo-pool-debug.log`，控制台只显示日志文件位置。默认只输出元数据和脱敏后的 key。需要查看截断正文时可以额外设置：
 
 ```powershell
 $env:DEBUG_PROXY_BODY = "1"
@@ -56,6 +56,7 @@ npm.cmd run debug
 | `MAX_BODY_BYTES` | `20971520` | 请求体大小限制 |
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic 请求默认版本头 |
 | `DEBUG_PROXY` | `0` | 开启代理调试日志 |
+| `DEBUG_PROXY_LOG_FILE` | 空 | 调试日志文件路径，设置后不在控制台刷完整日志 |
 | `DEBUG_PROXY_BODY` | `0` | 输出截断后的请求/响应正文预览 |
 | `DEBUG_PROXY_BODY_LIMIT` | `2000` | 正文预览最大字符数 |
 
