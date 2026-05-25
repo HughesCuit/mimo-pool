@@ -14,9 +14,18 @@ export function maskApiKey(apiKey: string): string {
 export async function buildRoutePlan(store: Store, protocol: Protocol): Promise<RouteTarget[]> {
   const now = Date.now();
   const rows = await store.listActiveKeysForRouting();
-  return rows
-    .filter((row) => row.groupEnabled && row.status === 'active' && !isKeyCoolingDown(row.id, now))
-    .sort((a, b) => a.groupSortOrder - b.groupSortOrder || a.sortOrder - b.sortOrder || a.id - b.id)
+  const activeRows = rows.filter((row) => row.groupEnabled && row.status === 'active');
+  const readyRows = activeRows.filter((row) => !isKeyCoolingDown(row.id, now));
+  const routedRows = readyRows.length > 0 ? readyRows : activeRows;
+
+  return routedRows
+    .sort((a, b) => {
+      if (readyRows.length === 0) {
+        const cooldownDelta = (keyCooldownUntil(a.id, now) ?? 0) - (keyCooldownUntil(b.id, now) ?? 0);
+        if (cooldownDelta !== 0) return cooldownDelta;
+      }
+      return a.groupSortOrder - b.groupSortOrder || a.sortOrder - b.sortOrder || a.id - b.id;
+    })
     .map((row) => ({
       groupCode: row.groupCode,
       groupName: row.groupName,
@@ -64,25 +73,26 @@ export function clearKeyCooldown(keyId: number): void {
 }
 
 export function getKeyCooldownUntil(keyId: number): number | undefined {
-  const until = cooldowns.get(keyId);
-  if (until !== undefined && until <= Date.now()) {
-    cooldowns.delete(keyId);
-    return undefined;
-  }
-  return until;
+  return keyCooldownUntil(keyId);
 }
 
 export function clearAllCooldownsForTests(): void {
   cooldowns.clear();
 }
 
-function isKeyCoolingDown(keyId: number, now = Date.now()): boolean {
+function keyCooldownUntil(keyId: number, now = Date.now()): number | undefined {
   const until = cooldowns.get(keyId);
-  if (until === undefined) return false;
+  if (until === undefined) return undefined;
   if (until <= now) {
     cooldowns.delete(keyId);
-    return false;
+    return undefined;
   }
+  return until;
+}
+
+function isKeyCoolingDown(keyId: number, now = Date.now()): boolean {
+  const until = keyCooldownUntil(keyId, now);
+  if (until === undefined) return false;
   return true;
 }
 
