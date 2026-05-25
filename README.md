@@ -54,7 +54,7 @@ npm.cmd run debug
 | `PROXY_TOKENS` | `change-me-proxy` | 下游中转 token，多个用逗号分隔 |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | 上游请求超时 |
 | `UPSTREAM_STREAM_TIMEOUT_MS` | `0` | 流式上游超时，`0` 表示不主动中断 |
-| `UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | `60000` | 流式上游已连接但长时间无数据时的空闲超时 |
+| `UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | `300000` | 流式上游已连接但长时间无数据时的空闲超时，设为 `0` 可关闭 |
 | `KEY_COOLDOWN_MS` | `60000` | 普通限速、网络错误、5xx 后临时跳过该 key 的时间 |
 | `MAX_BODY_BYTES` | `20971520` | 请求体大小限制 |
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic 请求默认版本头 |

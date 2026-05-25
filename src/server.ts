@@ -257,7 +257,11 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
         res.write(tail);
       }
     } catch (error) {
-      console.error('responses stream interrupted:', error);
+      if (error instanceof StreamIdleTimeoutError) {
+        console.warn(`responses stream idle timeout: ${error.message}`);
+      } else {
+        console.error('responses stream interrupted:', error);
+      }
       debugLog(debug, 'responses.stream_idle_or_read_error', { status: upstream.status, target: upstream.targetMeta, error: error instanceof Error ? error.message : String(error), downstreamChunks, downstreamBytes });
       const failure = transformer.fail(error);
       if (failure) {
@@ -290,7 +294,7 @@ class StreamIdleTimeoutError extends Error {
 }
 
 async function readWithStreamIdleTimeout(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {
-  const timeoutMs = Number(process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS ?? 60000);
+  const timeoutMs = Number(process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS ?? 300000);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return reader.read();
   }
