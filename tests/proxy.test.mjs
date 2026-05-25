@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createMemoryStore } from '../src/store.ts';
 import { proxyCompatibleRequest } from '../src/proxy.ts';
+import { clearAllCooldownsForTests, getKeyCooldownUntil } from '../src/routing.ts';
 
 function upstream(handler) {
   const server = http.createServer(handler);
@@ -71,6 +72,44 @@ test('proxyCompatibleRequest falls back after exhausted key and marks it exhaust
     const keys = await store.listKeys();
     assert.equal(keys.find((key) => key.id === firstKey.id).status, 'exhausted');
   } finally {
+    await first.close();
+    await second.close();
+  }
+});
+
+test('proxyCompatibleRequest temporarily cools down rate limited keys without exhausting them', async () => {
+  clearAllCooldownsForTests();
+  const first = await upstream((req, res) => {
+    assert.equal(req.headers.authorization, 'Bearer limited-key');
+    res.writeHead(429, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'rate limit exceeded' } }));
+  });
+  const second = await upstream((req, res) => {
+    assert.equal(req.headers.authorization, 'Bearer healthy-key');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${first.url}/v1` });
+    await store.updateServiceGroup('SGP', { openaiBaseUrl: `${second.url}/v1` });
+    const [limitedKey] = await store.importKeys('CN', ['limited-key']);
+    await store.importKeys('SGP', ['healthy-key']);
+
+    const result = await proxyCompatibleRequest(store, {
+      protocol: 'openai',
+      method: 'POST',
+      path: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(JSON.stringify({ model: 'mimo', messages: [] }))
+    });
+
+    assert.equal(result.status, 200);
+    assert.equal((await store.getKey(limitedKey.id)).status, 'active');
+    assert.ok(getKeyCooldownUntil(limitedKey.id));
+  } finally {
+    clearAllCooldownsForTests();
     await first.close();
     await second.close();
   }

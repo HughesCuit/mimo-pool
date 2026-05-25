@@ -13,8 +13,8 @@
   - `POST /anthropic/v1/messages`
 - 三个预置服务组：`CN`、`SGP`、`AMS`
 - 按服务组顺序、组内 key 固定顺序转发
-- 429 / quota / balance / exhausted / rate limit 类错误自动标记 key 耗尽并 fallback
-- 网络错误和 5xx 会尝试 fallback，但不会永久踢出 key
+- quota / balance / insufficient / exhausted 类错误自动标记 key 耗尽并 fallback
+- 429 / rate limit / 网络错误 / 5xx 会尝试 fallback，并对该 key 做短暂 cooldown，不会永久踢出 key
 - SQLite 持久化，内置 Web 管理界面和 REST 管理 API
 - 支持 `stream: true` 事件流透传
 
@@ -53,6 +53,8 @@ npm.cmd run debug
 | `ADMIN_TOKEN` | `change-me-admin` | 管理后台/API token |
 | `PROXY_TOKENS` | `change-me-proxy` | 下游中转 token，多个用逗号分隔 |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | 上游请求超时 |
+| `UPSTREAM_STREAM_TIMEOUT_MS` | `0` | 流式上游超时，`0` 表示不主动中断 |
+| `KEY_COOLDOWN_MS` | `60000` | 普通限速、网络错误、5xx 后临时跳过该 key 的时间 |
 | `MAX_BODY_BYTES` | `20971520` | 请求体大小限制 |
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic 请求默认版本头 |
 | `MODEL_ALIASES` | `gpt-*:mimo-v2.5-pro,o*:mimo-v2.5-pro,chatgpt-*:mimo-v2.5-pro` | OpenAI 模型别名映射，逗号分隔，支持 `*` 通配 |

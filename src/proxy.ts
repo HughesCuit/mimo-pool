@@ -1,4 +1,4 @@
-import { buildRoutePlan, classifyUpstreamFailure, resolveUpstreamUrl } from './routing.ts';
+import { buildRoutePlan, classifyUpstreamFailure, clearKeyCooldown, resolveUpstreamUrl, setKeyCooldown } from './routing.ts';
 import { debugBody, debugLog, type DebugContext } from './debug.ts';
 import type { Protocol, Store } from './types.ts';
 
@@ -57,6 +57,7 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
 
       if (response.ok) {
         await store.recordKeySuccess(target.keyId);
+        clearKeyCooldown(target.keyId);
         return { status: response.status, headers, body, target: compactTarget(target) };
       }
 
@@ -67,9 +68,18 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
         lastResult = { status: response.status, headers, body, target: compactTarget(target) };
         continue;
       }
+      if (failure === 'cooldown') {
+        await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
+        const cooldownUntil = setKeyCooldown(target.keyId);
+        debugLog(request.debug, 'proxy.key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
+        lastResult = { status: response.status, headers, body, target: compactTarget(target) };
+        continue;
+      }
       if (failure === 'retryable') {
         await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
+        const cooldownUntil = setKeyCooldown(target.keyId);
         debugLog(request.debug, 'proxy.retryable_failure', { target: compactTarget(target), status: response.status });
+        debugLog(request.debug, 'proxy.key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
         lastResult = { status: response.status, headers, body, target: compactTarget(target) };
         continue;
       }
@@ -80,6 +90,7 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
       lastError = error instanceof Error ? error : new Error(String(error));
       debugLog(request.debug, 'proxy.upstream_error', { target: compactTarget(target), error: lastError.message });
       await store.recordKeyFailure(target.keyId, lastError.message);
+      setKeyCooldown(target.keyId);
       continue;
     }
   }
@@ -147,6 +158,7 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
 
       if (response.ok) {
         await store.recordKeySuccess(target.keyId);
+        clearKeyCooldown(target.keyId);
         response.targetMeta = compactTarget(target);
         debugLog(request.debug, 'proxy.stream_upstream_open', { status: response.status, target: compactTarget(target) });
         return response;
@@ -166,9 +178,18 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
         lastResponse = response;
         continue;
       }
+      if (failure === 'cooldown') {
+        await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
+        const cooldownUntil = setKeyCooldown(target.keyId);
+        debugLog(request.debug, 'proxy.stream_key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
+        lastResponse = response;
+        continue;
+      }
       if (failure === 'retryable') {
         await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
+        const cooldownUntil = setKeyCooldown(target.keyId);
         debugLog(request.debug, 'proxy.stream_retryable_failure', { target: compactTarget(target), status: response.status });
+        debugLog(request.debug, 'proxy.stream_key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
         lastResponse = response;
         continue;
       }
@@ -180,6 +201,7 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
       lastError = error instanceof Error ? error : new Error(String(error));
       debugLog(request.debug, 'proxy.stream_upstream_error', { target: compactTarget(target), error: lastError.message });
       await store.recordKeyFailure(target.keyId, lastError.message);
+      setKeyCooldown(target.keyId);
       continue;
     }
   }

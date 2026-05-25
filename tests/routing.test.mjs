@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createMemoryStore } from '../src/store.ts';
-import { buildRoutePlan, classifyUpstreamFailure, maskApiKey } from '../src/routing.ts';
+import { buildRoutePlan, classifyUpstreamFailure, clearAllCooldownsForTests, maskApiKey, setKeyCooldown } from '../src/routing.ts';
 
 test('buildRoutePlan orders active keys by service group order then key order', async () => {
   const store = createMemoryStore();
@@ -34,8 +34,21 @@ test('buildRoutePlan skips disabled, exhausted, and inactive service groups', as
   assert.deepEqual(plan, []);
 });
 
+test('buildRoutePlan skips keys in temporary cooldown', async () => {
+  clearAllCooldownsForTests();
+  const store = createMemoryStore();
+  const [cooling] = await store.importKeys('CN', ['cooling-key']);
+  await store.importKeys('CN', ['ready-key']);
+  setKeyCooldown(cooling.id);
+
+  const plan = await buildRoutePlan(store, 'openai');
+
+  assert.deepEqual(plan.map((target) => target.apiKey), ['ready-key']);
+  clearAllCooldownsForTests();
+});
+
 test('classifyUpstreamFailure conservatively identifies exhausted keys', () => {
-  assert.equal(classifyUpstreamFailure(429, '{"error":{"message":"rate limit exceeded"}}'), 'exhausted');
+  assert.equal(classifyUpstreamFailure(429, '{"error":{"message":"rate limit exceeded"}}'), 'cooldown');
   assert.equal(classifyUpstreamFailure(400, '{"error":"insufficient balance"}'), 'exhausted');
   assert.equal(classifyUpstreamFailure(500, 'upstream unavailable'), 'retryable');
   assert.equal(classifyUpstreamFailure(404, 'model not found'), 'client');
