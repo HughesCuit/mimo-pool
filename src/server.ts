@@ -1,4 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import { once } from 'node:events';
 import { adminHtml } from './admin-ui.ts';
 import { parseTokenList, requireToken } from './auth.ts';
 import { listAdminModels, sendAdminChat, type ChatRequest } from './chat.ts';
@@ -246,7 +247,11 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
           if (converted) {
             downstreamChunks += 1;
             downstreamBytes += Buffer.byteLength(converted);
-            res.write(converted);
+            await writeResponseChunk(res, converted);
+          } else {
+            downstreamChunks += 1;
+            downstreamBytes += Buffer.byteLength(responseStreamKeepalive);
+            await writeResponseChunk(res, responseStreamKeepalive);
           }
         }
       }
@@ -254,7 +259,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       if (tail) {
         downstreamChunks += 1;
         downstreamBytes += Buffer.byteLength(tail);
-        res.write(tail);
+        await writeResponseChunk(res, tail);
       }
     } catch (error) {
       if (error instanceof StreamIdleTimeoutError) {
@@ -267,7 +272,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       if (failure) {
         downstreamChunks += 1;
         downstreamBytes += Buffer.byteLength(failure);
-        res.write(failure);
+        await writeResponseChunk(res, failure);
       }
     }
     res.end();
@@ -291,6 +296,13 @@ class StreamIdleTimeoutError extends Error {
     super(`Upstream stream produced no data for ${timeoutMs}ms`);
     this.name = 'StreamIdleTimeoutError';
   }
+}
+
+const responseStreamKeepalive = ': mimo-pool keepalive\n\n';
+
+async function writeResponseChunk(res: ServerResponse, chunk: string | Buffer): Promise<void> {
+  if (res.write(chunk)) return;
+  await once(res, 'drain');
 }
 
 async function readWithStreamIdleTimeout(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {

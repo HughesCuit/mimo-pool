@@ -412,6 +412,53 @@ test('app maps streamed chat completion SSE into responses SSE instead of parsin
   }
 });
 
+test('streaming responses keep downstream alive during reasoning-only upstream chunks', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const target = await upstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"reasoning_content":"thinking one"}}]}\n\n');
+      setTimeout(() => {
+        res.write('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"reasoning_content":"thinking two"}}]}\n\n');
+      }, 5);
+      setTimeout(() => {
+        res.write('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"content":"visible"}}]}\n\n');
+        res.end('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"finish_reason":"stop"}]}\n\ndata:[DONE]\n\n');
+      }, 10);
+    });
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['reasoning-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          input: 'think first',
+          stream: true
+        })
+      });
+      const text = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(text, /: mimo-pool reasoning keepalive/);
+      assert.match(text, /"delta":"visible"/);
+      assert.match(text, /event: response\.completed/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
 test('streaming OpenAI responses applies default gpt model alias before upstream request', async () => {
   const { createApp } = await import('../src/server.ts');
   let observedPayload = null;

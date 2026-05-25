@@ -364,6 +364,10 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
         });
       }
       const delta = choice.delta?.content ?? choice.message?.content ?? '';
+      const reasoningDelta = choice.delta?.reasoning_content ?? '';
+      if (reasoningDelta && !delta) {
+        out += sseComment('mimo-pool reasoning keepalive');
+      }
       if (delta) {
         rawText += delta;
         if (!delta.includes('<tool_call>') && !rawText.includes('<tool_call>')) {
@@ -624,6 +628,10 @@ void legacyChatSseToResponsesSse;
 function sse(payload: unknown): string {
   const type = typeof payload === 'object' && payload && 'type' in payload ? String((payload as { type: unknown }).type) : 'message';
   return `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+function sseComment(text: string): string {
+  return `: ${text.replace(/\r?\n/g, ' ')}\n\n`;
 }
 
 function responseObject(id: string, createdAt: number, status: 'in_progress' | 'completed' | 'incomplete', model: string, outputText: string, output: unknown[] | string) {
