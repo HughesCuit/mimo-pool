@@ -919,6 +919,52 @@ test('streaming responses pass upstream non-ok errors through without fake compl
   }
 });
 
+test('streaming responses fail visibly when upstream opens SSE but stays idle', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const previousTimeout = process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS;
+  process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS = '20';
+  const target = await upstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.flushHeaders();
+      res.write(': upstream opened but has no data events\n\n');
+      setTimeout(() => res.end(), 200);
+    });
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['idle-stream-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          input: 'hang',
+          stream: true
+        })
+      });
+      const text = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(text, /event: response\.failed/);
+      assert.match(text, /Upstream stream produced no data/);
+      assert.match(text, /data: \[DONE\]/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (previousTimeout === undefined) delete process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS;
+    else process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS = previousTimeout;
+    await target.close();
+  }
+});
+
 test('streaming responses emit visible failure events when upstream SSE is malformed', async () => {
   const { createApp } = await import('../src/server.ts');
   const target = await upstream((req, res) => {

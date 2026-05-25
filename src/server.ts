@@ -169,14 +169,18 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
       const reader = upstream.body.getReader();
       let chunks = 0;
       let bytes = 0;
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (value) {
-          chunks += 1;
-          bytes += value.byteLength;
-          res.write(Buffer.from(value));
+      try {
+        while (true) {
+          const { value, done } = await readWithStreamIdleTimeout(reader);
+          if (done) break;
+          if (value) {
+            chunks += 1;
+            bytes += value.byteLength;
+            res.write(Buffer.from(value));
+          }
         }
+      } catch (error) {
+        debugLog(debug, 'proxy.stream_idle_timeout', { status: upstream.status, target: upstream.targetMeta, error: error instanceof Error ? error.message : String(error), chunks, bytes });
       }
       res.end();
       debugLog(debug, 'proxy.stream_request_end', { status: upstream.status, target: upstream.targetMeta, chunks, bytes });
@@ -235,7 +239,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
     let downstreamBytes = 0;
     try {
       while (true) {
-        const { value, done } = await reader.read();
+        const { value, done } = await readWithStreamIdleTimeout(reader);
         if (done) break;
         if (value) {
           const converted = transformer.transform(value);
@@ -254,6 +258,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       }
     } catch (error) {
       console.error('responses stream interrupted:', error);
+      debugLog(debug, 'responses.stream_idle_or_read_error', { status: upstream.status, target: upstream.targetMeta, error: error instanceof Error ? error.message : String(error), downstreamChunks, downstreamBytes });
       const failure = transformer.fail(error);
       if (failure) {
         downstreamChunks += 1;
@@ -274,6 +279,36 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       return;
     }
     throw error;
+  }
+}
+
+class StreamIdleTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Upstream stream produced no data for ${timeoutMs}ms`);
+    this.name = 'StreamIdleTimeoutError';
+  }
+}
+
+async function readWithStreamIdleTimeout(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {
+  const timeoutMs = Number(process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS ?? 60000);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return reader.read();
+  }
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new StreamIdleTimeoutError(timeoutMs));
+          queueMicrotask(() => {
+            void reader.cancel().catch(() => undefined);
+          });
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
