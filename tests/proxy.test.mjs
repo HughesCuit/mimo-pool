@@ -701,6 +701,7 @@ test('responses adapter forwards tools and continues tool calls with function_ca
       assert.equal(first.status, 200);
       assert.equal(call.name, 'exec');
       assert.equal(call.call_id, 'call_native_1');
+      assert.equal(observedPayloads[0].messages.some((message) => message.role === 'system' && message.content.includes('MUST call the provided tool')), true);
       assert.deepEqual(observedPayloads[0].tools, [{
         type: 'function',
         function: {
@@ -715,7 +716,8 @@ test('responses adapter forwards tools and continues tool calls with function_ca
       }]);
       assert.equal(observedPayloads[0].tool_choice, 'required');
       assert.equal(second.status, 200);
-      assert.deepEqual(observedPayloads[1].messages, [
+      assert.equal(observedPayloads[1].messages.some((message) => message.role === 'system' && message.content.includes('previous message is a tool result')), true);
+      assert.deepEqual(observedPayloads[1].messages.filter((message) => message.role !== 'system'), [
         { role: 'user', content: 'check project' },
         { role: 'assistant', content: null, tool_calls: [{
           id: 'call_native_1',
@@ -867,7 +869,8 @@ test('responses adapter converts full input function_call history without previo
       const body = await response.json();
 
       assert.equal(response.status, 200);
-      assert.deepEqual(observedPayload.messages, [
+      assert.equal(observedPayload.messages.some((message) => message.role === 'system' && message.content.includes('MUST call the provided tool')), true);
+      assert.deepEqual(observedPayload.messages.filter((message) => message.role !== 'system'), [
         { role: 'user', content: 'inspect project' },
         { role: 'assistant', content: null, tool_calls: [{
           id: 'call_exec_1',
@@ -956,7 +959,9 @@ test('streaming responses adapter remembers tool calls for the next function out
       assert.ok(responseId);
       assert.ok(callId);
       assert.equal(second.status, 200);
-      assert.deepEqual(observedPayloads[1].messages, [
+      assert.equal(observedPayloads[1].messages.filter((message) => message.role === 'system').length, 2);
+      assert.equal(observedPayloads[1].messages.some((message) => message.role === 'system' && message.content.includes('previous message is a tool result')), true);
+      assert.deepEqual(observedPayloads[1].messages.filter((message) => message.role !== 'system'), [
         { role: 'user', content: 'where am I' },
         { role: 'assistant', content: null, tool_calls: [{
           id: callId,

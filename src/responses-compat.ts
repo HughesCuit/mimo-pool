@@ -696,8 +696,9 @@ function responseOutputItems(messageId: string, outputText: string, toolCalls: P
 function rememberResponse(responseId: string, requestMessages: ChatMessage[], output: unknown[]): void {
   const assistant = assistantMessageFromOutput(output);
   if (!assistant) return;
+  const conversationMessages = requestMessages.filter((message) => message.role !== 'system');
   pruneResponseHistories();
-  responseHistories.set(responseId, { messages: [...requestMessages, assistant], expiresAt: Date.now() + responseSessionTtlMs() });
+  responseHistories.set(responseId, { messages: [...conversationMessages, assistant], expiresAt: Date.now() + responseSessionTtlMs() });
   while (responseHistories.size > maxResponseHistories) {
     const oldest = responseHistories.keys().next().value;
     if (!oldest) break;
@@ -838,6 +839,9 @@ function responsesToChatPayload(request: ResponsesRequest) {
   }
   if (shouldAddToolNudge(request)) {
     messages.push({ role: 'system', content: toolNudgeInstruction() });
+    if (hasFunctionCallOutput(request.input)) {
+      messages.push({ role: 'system', content: toolContinuationInstruction() });
+    }
   }
   if (request.previous_response_id) {
     messages.push(...historyMessages(request.previous_response_id));
@@ -868,16 +872,31 @@ function responsesToChatPayload(request: ResponsesRequest) {
 
 function shouldAddToolNudge(request: ResponsesRequest): boolean {
   if (!request.tools?.length) return false;
-  const value = process.env.RESPONSES_TOOL_NUDGE ?? '0';
-  return value === '1' || value === 'true';
+  const value = process.env.RESPONSES_TOOL_NUDGE ?? '1';
+  return value !== '0' && value !== 'false';
 }
 
 function toolNudgeInstruction(): string {
   return [
     'Tool-use compatibility instruction:',
-    'When the user asks you to inspect files, run commands, edit code, test, search the workspace, or otherwise act on the project, call the provided tool instead of only describing what you would do.',
-    'Use the tool_calls/function_call interface provided by the API. Do not print XML, JSON, or pseudo tool calls as plain text.'
+    'When the user asks you to inspect files, run commands, edit code, test, search the workspace, or otherwise act on the project, you MUST call the provided tool instead of only describing what you would do.',
+    'Do not answer with progress narration such as "I will", "Let me", "Starting", "Now I will", or "I am going to" when a tool call is needed.',
+    'Use the tool_calls/function_call interface provided by the API. Do not print XML, JSON, Markdown, or pseudo tool calls as plain text.',
+    'After a tool result, either call the next required tool immediately or give the final answer if no more action is needed.'
   ].join(' ');
+}
+
+function toolContinuationInstruction(): string {
+  return [
+    'The previous message is a tool result.',
+    'If the task is not complete, continue by issuing the next tool call now.',
+    'Do not say what you plan to do next.',
+    'For file creation or edits, call the editing/shell tool with the actual operation instead of explaining that you will create files.'
+  ].join(' ');
+}
+
+function hasFunctionCallOutput(input: unknown): boolean {
+  return Array.isArray(input) && input.some((item) => Boolean(item && typeof item === 'object' && (item as { type?: unknown }).type === 'function_call_output'));
 }
 
 function mergeConsecutiveAssistantToolCalls(messages: ChatMessage[]): ChatMessage[] {
