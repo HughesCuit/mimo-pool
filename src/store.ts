@@ -59,7 +59,7 @@ export class MemoryStore implements Store {
 
   async updateServiceGroup(code: string, patch: Partial<Pick<ServiceGroup, 'sortOrder' | 'enabled' | 'openaiBaseUrl' | 'anthropicBaseUrl'>>): Promise<ServiceGroup> {
     const group = this.requireGroup(code);
-    const updated = { ...group, ...patch, updatedAt: nowIso() };
+    const updated = { ...group, ...definedPatch(patch), updatedAt: nowIso() };
     this.groups.set(code, updated);
     return clone(updated);
   }
@@ -233,7 +233,7 @@ export class SqliteStore implements Store {
 
   async updateServiceGroup(code: string, patch: Partial<Pick<ServiceGroup, 'sortOrder' | 'enabled' | 'openaiBaseUrl' | 'anthropicBaseUrl'>>): Promise<ServiceGroup> {
     const current = await this.requireGroup(code);
-    const updated = { ...current, ...patch, updatedAt: nowIso() };
+    const updated = { ...current, ...definedPatch(patch), updatedAt: nowIso() };
     this.db.prepare('UPDATE service_groups SET sort_order = ?, enabled = ?, openai_base_url = ?, anthropic_base_url = ?, updated_at = ? WHERE code = ?')
       .run(updated.sortOrder, updated.enabled ? 1 : 0, updated.openaiBaseUrl, updated.anthropicBaseUrl, updated.updatedAt, code);
     return updated;
@@ -505,4 +505,8 @@ function validateBackup(snapshot: BackupSnapshot): void {
 
 export function createSqliteStore(filePath = process.env.DB_PATH ?? 'data/mimo-pool.sqlite'): Store {
   return new SqliteStore(filePath);
+}
+
+function definedPatch<T extends Record<string, unknown>>(patch: T): Partial<T> {
+  return Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<T>;
 }

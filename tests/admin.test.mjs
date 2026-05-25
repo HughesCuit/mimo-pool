@@ -57,6 +57,28 @@ test('SqliteStore can enable and disable keys without treating status literals a
   }
 });
 
+test('SqliteStore service group partial updates keep omitted URLs unchanged', async () => {
+  const dbPath = join(tmpdir(), `mimo-pool-${Date.now()}-${Math.random()}.sqlite`);
+  const store = new SqliteStore(dbPath);
+  try {
+    const before = (await store.listServiceGroups()).find((group) => group.code === 'CN');
+
+    const updated = await store.updateServiceGroup('CN', { openaiBaseUrl: 'http://127.0.0.1:9999/v1' });
+
+    assert.equal(updated.openaiBaseUrl, 'http://127.0.0.1:9999/v1');
+    assert.equal(updated.anthropicBaseUrl, before.anthropicBaseUrl);
+  } finally {
+    store.close();
+    for (const suffix of ['', '-shm', '-wal']) {
+      try {
+        unlinkSync(dbPath + suffix);
+      } catch {
+        // Ignore cleanup races on Windows.
+      }
+    }
+  }
+});
+
 test('store backup export includes raw keys and import restores groups, keys, status, and stats', async () => {
   const source = createMemoryStore();
   await source.updateServiceGroup('SGP', {
