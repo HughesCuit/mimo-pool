@@ -156,13 +156,44 @@ export const adminHtml = `<!doctype html>
       token: localStorage.getItem('adminToken') || '',
       groups: [],
       keys: [],
-      sessions: JSON.parse(localStorage.getItem('chatSessions') || '[]'),
+      sessions: loadStoredSessions(),
       activeSessionId: localStorage.getItem('activeSessionId') || ''
     };
 
     const el = (id) => document.getElementById(id);
     const tokenInput = el('token');
     tokenInput.value = state.token;
+
+    window.addEventListener('error', (event) => {
+      const message = String(event.message || '');
+      if (message.includes('isUserVerifyingPlatformAuthenticatorAvailable') || String(event.filename || '').includes('webauthnInterceptor')) {
+        return;
+      }
+      const target = el('loginMessage') || el('message');
+      if (target) {
+        target.className = 'error';
+        target.textContent = '页面脚本错误：' + message;
+      }
+    });
+
+    function loadStoredSessions() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem('chatSessions') || '[]');
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter((session) => session && typeof session === 'object').map((session) => ({
+          id: String(session.id || Date.now()),
+          title: String(session.title || '新会话'),
+          messages: Array.isArray(session.messages) ? session.messages.map((message) => ({
+            role: typeof message.role === 'string' ? message.role : 'system',
+            content: typeof message.content === 'string' ? message.content : String(message.content || '')
+          })) : []
+        }));
+      } catch {
+        localStorage.removeItem('chatSessions');
+        localStorage.removeItem('activeSessionId');
+        return [];
+      }
+    }
 
     const api = async (path, options = {}) => {
       const response = await fetch('/admin/api' + path, {
