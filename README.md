@@ -58,7 +58,7 @@ npm.cmd run debug
 | `KEY_COOLDOWN_MS` | `60000` | 普通限速、网络错误、5xx 后临时跳过该 key 的时间 |
 | `MAX_BODY_BYTES` | `20971520` | 请求体大小限制 |
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic 请求默认版本头 |
-| `MODEL_ALIASES` | `gpt-*:mimo-v2.5-pro,o*:mimo-v2.5-pro,chatgpt-*:mimo-v2.5-pro` | OpenAI 模型别名映射，逗号分隔，支持 `*` 通配 |
+| `MODEL_ALIASES` | `gpt-*:mimo-v2.5-pro,o*:mimo-v2.5-pro,chatgpt-*:mimo-v2.5-pro,codex-*:mimo-v2.5-pro` | OpenAI 模型别名映射，逗号分隔，支持 `*` 通配 |
 | `RESPONSES_SESSION_TTL_MS` | `3600000` | Responses 兼容层记忆 `previous_response_id` 会话的时间 |
 | `RESPONSES_TOOL_NUDGE` | `0` | 设为 `1` 时，在有 tools 的 Responses 请求中追加一条工具调用提示，减少模型只口头回答不调用工具的情况 |
 | `DEBUG_PROXY` | `0` | 开启代理调试日志 |

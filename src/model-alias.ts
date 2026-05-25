@@ -91,7 +91,8 @@ function parseAliases(value: string): ModelAlias[] {
 const defaultModelAliases = [
   'gpt-*:mimo-v2.5-pro',
   'o*:mimo-v2.5-pro',
-  'chatgpt-*:mimo-v2.5-pro'
+  'chatgpt-*:mimo-v2.5-pro',
+  'codex-*:mimo-v2.5-pro'
 ].join(',');
 
 function aliasMatches(pattern: string, model: string): boolean {

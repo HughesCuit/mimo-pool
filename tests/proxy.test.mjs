@@ -224,6 +224,53 @@ test('OpenAI proxy maps configured model aliases upstream and restores response 
   }
 });
 
+test('OpenAI proxy maps default codex model aliases upstream', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const previousAliases = process.env.MODEL_ALIASES;
+  delete process.env.MODEL_ALIASES;
+  let observedPayload = null;
+  const target = await upstream(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-codex-alias',
+      model: observedPayload.model,
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['codex-alias-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'codex-auto-review',
+          input: 'review',
+        })
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(observedPayload.model, 'mimo-v2.5-pro');
+      assert.equal(body.model, 'codex-auto-review');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (previousAliases === undefined) delete process.env.MODEL_ALIASES;
+    else process.env.MODEL_ALIASES = previousAliases;
+    await target.close();
+  }
+});
+
 test('OpenAI models endpoint includes configured model aliases', async () => {
   const { createApp } = await import('../src/server.ts');
   const previousAliases = process.env.MODEL_ALIASES;
