@@ -183,6 +183,16 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
   try {
     const proxyRequest = responsesChatProxyRequest(body, req.headers);
     const upstream = await prepareStreamingProxy(store, proxyRequest);
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, responseHeaders(upstream.headers));
+      if (!upstream.body) {
+        res.end();
+        return;
+      }
+      const errorBody = Buffer.from(await upstream.arrayBuffer());
+      res.end(errorBody);
+      return;
+    }
     res.writeHead(upstream.status, {
       ...responseHeaders(upstream.headers),
       'content-type': 'text/event-stream; charset=utf-8',
@@ -207,7 +217,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       res.write(transformer.flush());
     } catch (error) {
       console.error('responses stream interrupted:', error);
-      res.write(transformer.flush());
+      res.write(transformer.fail(error));
     }
     res.end();
   } catch (error) {

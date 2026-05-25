@@ -111,6 +111,8 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
   let initialized = false;
   let textItemStarted = false;
   let completed = false;
+  let failed = false;
+  let finalFinishReason = '';
   const nativeToolCalls = new Map<number, ChatToolCall>();
 
   function ensureInitialized(): string {
@@ -148,7 +150,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
   }
 
   function complete(): string {
-    if (completed) return '';
+    if (completed || failed) return '';
     completed = true;
     const parsed = splitToolCalls(rawText || outputText);
     const toolCalls = [...Array.from(nativeToolCalls.values()).map(chatToolCallToParsed), ...parsed.toolCalls];
@@ -210,11 +212,33 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
     if (options.requestMessages) {
       rememberResponse(responseId, options.requestMessages, outputItems);
     }
+    const finalStatus = finalFinishReason === 'length' ? 'incomplete' : 'completed';
+    const finalEvent = finalStatus === 'incomplete' ? 'response.incomplete' : 'response.completed';
     return [
       out,
       sse({
-        type: 'response.completed',
-        response: responseObject(responseId, created, 'completed', model, outputText, outputItems)
+        type: finalEvent,
+        response: responseObject(responseId, created, finalStatus, model, outputText, outputItems)
+      }),
+      'data: [DONE]\n\n'
+    ].join('');
+  }
+
+  function fail(error: unknown): string {
+    if (completed || failed) return '';
+    failed = true;
+    const message = error instanceof Error ? error.message : String(error);
+    return [
+      ensureInitialized(),
+      sse({
+        type: 'error',
+        code: 'stream_conversion_error',
+        message: `Failed to convert upstream chat stream: ${message}`
+      }),
+      sse({
+        type: 'response.failed',
+        sequence_number: sequence++,
+        response: failedResponseObject(responseId, created, model, `Failed to convert upstream chat stream: ${message}`)
       }),
       'data: [DONE]\n\n'
     ].join('');
@@ -273,6 +297,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
         }
       }
       if (choice.finish_reason) {
+        finalFinishReason = choice.finish_reason;
         out += complete();
       }
     }
@@ -281,6 +306,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
 
   return {
     transform(chunk: Buffer | Uint8Array): string {
+      if (completed || failed) return '';
       buffer += Buffer.from(chunk).toString('utf8');
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
@@ -292,6 +318,7 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
       return out;
     },
     flush(): string {
+      if (failed) return '';
       let out = '';
       if (buffer.trim().startsWith('data:')) {
         out += handlePayload(buffer.trim().slice(5).trim());
@@ -299,7 +326,8 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
       out += ensureInitialized();
       out += complete();
       return out;
-    }
+    },
+    fail
   };
 }
 
@@ -431,15 +459,34 @@ function sse(payload: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
-function responseObject(id: string, createdAt: number, status: 'in_progress' | 'completed', model: string, outputText: string, output: unknown[] | string) {
+function responseObject(id: string, createdAt: number, status: 'in_progress' | 'completed' | 'incomplete', model: string, outputText: string, output: unknown[] | string) {
   return {
     id,
     object: 'response',
     created_at: createdAt,
     status,
     model,
-    output: status === 'completed' ? output : [],
-    output_text: status === 'completed' ? outputText : undefined,
+    output: status === 'completed' || status === 'incomplete' ? output : [],
+    output_text: status === 'completed' || status === 'incomplete' ? outputText : undefined,
+    incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null,
+    error: null,
+    usage: null
+  };
+}
+
+function failedResponseObject(id: string, createdAt: number, model: string, message: string) {
+  return {
+    id,
+    object: 'response',
+    created_at: createdAt,
+    status: 'failed',
+    error: {
+      code: 'stream_conversion_error',
+      message
+    },
+    incomplete_details: null,
+    model,
+    output: [],
     usage: null
   };
 }
@@ -657,8 +704,9 @@ function parseJson(body: Buffer): Record<string, unknown> {
 }
 
 function chatCompletionToResponse(chatBody: Record<string, unknown>, fallbackModel: string) {
-  const choices = chatBody.choices as Array<{ message?: { content?: string | null; tool_calls?: ChatToolCall[] } }> | undefined;
-  const message = choices?.[0]?.message;
+  const choices = chatBody.choices as Array<{ message?: { content?: string | null; tool_calls?: ChatToolCall[] }; finish_reason?: string }> | undefined;
+  const choice = choices?.[0];
+  const message = choice?.message;
   const parsed = splitToolCalls(message?.content ?? '');
   const toolCalls = [
     ...(message?.tool_calls ?? []).map((call, index) => chatToolCallToParsed(normalizeChatToolCall(call, index, Math.floor(Date.now() / 1000)))),
@@ -671,10 +719,12 @@ function chatCompletionToResponse(chatBody: Record<string, unknown>, fallbackMod
     id: typeof chatBody.id === 'string' ? chatBody.id.replace(/^chatcmpl-/, 'resp_') : `resp_${created}`,
     object: 'response',
     created_at: created,
-    status: 'completed',
+    status: choice?.finish_reason === 'length' ? 'incomplete' : 'completed',
     model: typeof chatBody.model === 'string' ? chatBody.model : fallbackModel,
     output,
     output_text: outputText,
+    incomplete_details: choice?.finish_reason === 'length' ? { reason: 'max_output_tokens' } : null,
+    error: null,
     usage: chatBody.usage ?? null
   };
 }

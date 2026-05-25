@@ -547,3 +547,158 @@ test('streaming responses are not aborted by the non-stream upstream timeout', a
     await target.close();
   }
 });
+
+test('streaming responses pass upstream non-ok errors through without fake completion', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const target = await upstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'bad request from upstream' } }));
+    });
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['stream-error-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'mimo-v2.5-pro', input: 'bad', stream: true })
+      });
+      const text = await response.text();
+
+      assert.equal(response.status, 400);
+      assert.match(response.headers.get('content-type'), /application\/json/);
+      assert.match(text, /bad request from upstream/);
+      assert.doesNotMatch(text, /response\.completed/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
+test('streaming responses emit visible failure events when upstream SSE is malformed', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const target = await upstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end('data:{"id":"chatcmpl-bad","choices":[bad json]}\n\n');
+    });
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['bad-sse-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'mimo-v2.5-pro', input: 'bad sse', stream: true })
+      });
+      const text = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(text, /event: error/);
+      assert.match(text, /event: response\.failed/);
+      assert.match(text, /Failed to convert upstream chat stream/);
+      assert.doesNotMatch(text, /event: response\.completed/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
+test('streaming responses map chat length finish_reason to response.incomplete', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const target = await upstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end([
+        'data:{"id":"chatcmpl-length","model":"mimo-v2.5-pro","choices":[{"finish_reason":"length","index":0,"message":{"content":"partial","role":"assistant"}}]}',
+        '',
+        'data:[DONE]',
+        ''
+      ].join('\n'));
+    });
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['length-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'mimo-v2.5-pro', input: 'long', stream: true })
+      });
+      const text = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(text, /event: response\.incomplete/);
+      assert.match(text, /"status":"incomplete"/);
+      assert.match(text, /"reason":"max_output_tokens"/);
+      assert.doesNotMatch(text, /event: response\.completed/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
+test('non-streaming responses map chat length finish_reason to incomplete response', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const target = await upstream(async (req, res) => {
+    for await (const _chunk of req) {
+      // drain request
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-length-json',
+      model: 'mimo-v2.5-pro',
+      choices: [{ message: { role: 'assistant', content: 'partial json' }, finish_reason: 'length' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['length-json-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'mimo-v2.5-pro', input: 'long' })
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(body.status, 'incomplete');
+      assert.deepEqual(body.incomplete_details, { reason: 'max_output_tokens' });
+      assert.equal(body.output_text, 'partial json');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
