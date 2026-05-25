@@ -718,7 +718,22 @@ function inputToMessages(input: unknown): ChatMessage[] {
   if (!Array.isArray(input)) return [];
   return input.map((item) => {
     if (typeof item === 'string') return { role: 'user', content: item };
-    const record = item as { role?: string; content?: unknown; type?: string; call_id?: unknown; output?: unknown };
+    const record = item as { role?: string; content?: unknown; type?: string; call_id?: unknown; output?: unknown; name?: unknown; arguments?: unknown };
+    if (record.type === 'function_call') {
+      const callId = String(record.call_id ?? `call_${Date.now()}`);
+      return {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: callId,
+          type: 'function',
+          function: {
+            name: String(record.name ?? ''),
+            arguments: typeof record.arguments === 'string' ? record.arguments : JSON.stringify(record.arguments ?? {})
+          }
+        }]
+      };
+    }
     if (record.type === 'function_call_output') {
       return {
         role: 'tool',

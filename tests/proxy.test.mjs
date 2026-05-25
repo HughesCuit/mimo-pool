@@ -415,6 +415,64 @@ test('responses adapter forwards tools and continues tool calls with function_ca
   }
 });
 
+test('responses adapter converts full input function_call history without previous_response_id', async () => {
+  const { createApp } = await import('../src/server.ts');
+  let observedPayload = null;
+  const target = await upstream(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-full-history',
+      model: observedPayload.model,
+      choices: [{ message: { role: 'assistant', content: 'continued after tool' }, finish_reason: 'stop' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
+    await store.importKeys('CN', ['full-history-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          input: [
+            { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect project' }] },
+            { type: 'function_call', call_id: 'call_exec_1', name: 'exec', arguments: '{"command":"ls -la"}' },
+            { type: 'function_call_output', call_id: 'call_exec_1', output: 'package.json\nsrc' },
+            { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }] }
+          ],
+          tools: [{ type: 'function', name: 'exec', parameters: { type: 'object' } }]
+        })
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(observedPayload.messages, [
+        { role: 'user', content: 'inspect project' },
+        { role: 'assistant', content: null, tool_calls: [{
+          id: 'call_exec_1',
+          type: 'function',
+          function: { name: 'exec', arguments: '{"command":"ls -la"}' }
+        }] },
+        { role: 'tool', tool_call_id: 'call_exec_1', content: 'package.json\nsrc' },
+        { role: 'user', content: 'continue' }
+      ]);
+      assert.equal(body.output_text, 'continued after tool');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
 test('streaming responses adapter remembers tool calls for the next function output request', async () => {
   const { createApp } = await import('../src/server.ts');
   const observedPayloads = [];
