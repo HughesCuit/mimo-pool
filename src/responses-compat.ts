@@ -1,6 +1,5 @@
 import { proxyCompatibleRequest, type ProxyRequest, type ProxyResult } from './proxy.ts';
 import { debugBody, debugLog, type DebugContext } from './debug.ts';
-import { applyModelAlias, restoreModelAlias } from './model-alias.ts';
 import type { Store } from './types.ts';
 
 type ResponsesRequest = {
@@ -42,13 +41,12 @@ const defaultResponseSessionTtlMs = 60 * 60 * 1000;
 export async function proxyResponsesViaChatCompletions(store: Store, body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): Promise<ProxyResult> {
   const request = parseResponsesRequest(body);
   const chatPayload = responsesToChatPayload(request);
-  const aliased = applyModelAlias(Buffer.from(JSON.stringify(chatPayload)), debug);
   debugLog(debug, 'responses.compat_request', {
     chatMessageCount: chatPayload.messages.length,
     hasPreviousResponse: Boolean(request.previous_response_id),
     toolCount: request.tools?.length ?? 0
   });
-  const result = await proxyCompatibleRequest(store, { ...responsesChatProxyRequestFromBody(aliased.body, headers), debug });
+  const result = await proxyCompatibleRequest(store, { ...responsesChatProxyRequestFromPayload(chatPayload, headers), debug });
 
   if (result.status < 200 || result.status >= 300) return result;
 
@@ -61,7 +59,7 @@ export async function proxyResponsesViaChatCompletions(store: Store, body: Buffe
   }
 
   const chatBody = parseJson(result.body);
-  const response = chatCompletionToResponse(chatBody, aliased.originalModel ?? request.model ?? chatPayload.model);
+  const response = chatCompletionToResponse(chatBody, request.model ?? chatPayload.model);
   rememberResponse(response.id, chatPayload.messages, response.output);
   debugLog(debug, 'responses.compat_response', {
     responseId: response.id,
@@ -73,7 +71,7 @@ export async function proxyResponsesViaChatCompletions(store: Store, body: Buffe
   return {
     ...result,
     headers: { ...result.headers, 'content-type': 'application/json' },
-    body: restoreModelAlias(Buffer.from(JSON.stringify(response)), aliased.originalModel, aliased.upstreamModel, debug)
+    body: Buffer.from(JSON.stringify(response))
   };
 }
 
@@ -85,21 +83,18 @@ export function isStreamingResponsesRequest(body: Buffer): boolean {
   }
 }
 
-export function responsesChatProxyRequest(body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): ProxyRequest & { fallbackModel: string; chatMessages: ChatMessage[]; originalModel?: string; upstreamModel?: string } {
+export function responsesChatProxyRequest(body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): ProxyRequest & { fallbackModel: string; chatMessages: ChatMessage[] } {
   const request = parseResponsesRequest(body);
   const chatPayload = responsesToChatPayload(request);
-  const aliased = applyModelAlias(Buffer.from(JSON.stringify(chatPayload)), debug);
   debugLog(debug, 'responses.stream_compat_request', {
     chatMessageCount: chatPayload.messages.length,
     hasPreviousResponse: Boolean(request.previous_response_id),
     toolCount: request.tools?.length ?? 0
   });
   return {
-    ...responsesChatProxyRequestFromBody(aliased.body, headers),
-    fallbackModel: aliased.originalModel ?? request.model ?? chatPayload.model,
+    ...responsesChatProxyRequestFromPayload(chatPayload, headers),
+    fallbackModel: request.model ?? chatPayload.model,
     chatMessages: chatPayload.messages,
-    originalModel: aliased.originalModel,
-    upstreamModel: aliased.upstreamModel,
     debug
   };
 }

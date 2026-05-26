@@ -112,7 +112,6 @@ async function startMimoPool() {
       KEY_COOLDOWN_MS: '60000',
       UPSTREAM_TIMEOUT_MS: '5000',
       UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '5000',
-      MODEL_ALIASES: 'gpt-*:mimo-v2.5-pro,o*:mimo-v2.5-pro,chatgpt-*:mimo-v2.5-pro,codex-*:mimo-v2.5-pro',
       RESPONSES_TOOL_NUDGE: '1'
     },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -183,7 +182,7 @@ async function proxyResponses(baseUrl, body) {
   });
 }
 
-test('e2e dist server handles Responses streaming, tools, model aliases, and fallback', async (t) => {
+test('e2e dist server handles Responses streaming, tools, and fallback', async (t) => {
   const mock = createMockMimo();
   const upstream = await listen(mock.server);
   const app = await startMimoPool();
@@ -209,7 +208,7 @@ test('e2e dist server handles Responses streaming, tools, model aliases, and fal
     );
 
     const first = await proxyResponses(app.baseUrl, {
-      model: 'codex-auto-review',
+      model: 'mimo-v2.5-pro',
       stream: true,
       input: 'hello'
     });
@@ -217,7 +216,7 @@ test('e2e dist server handles Responses streaming, tools, model aliases, and fal
     const firstEvents = parseSse(await first.text());
     assert.equal(firstEvents.at(-1).type, 'response.completed');
     assert.equal(firstEvents.at(-1).response.output_text, 'hello');
-    assert.equal(firstEvents.at(-1).response.model, 'codex-auto-review');
+    assert.equal(firstEvents.at(-1).response.model, 'mimo-v2.5-pro');
     assert.equal(mock.requests[0].auth, 'Bearer e2e-cn-key');
     assert.equal(mock.requests[1].auth, 'Bearer e2e-sgp-key');
     assert.equal(mock.requests[1].body.model, 'mimo-v2.5-pro');
@@ -247,7 +246,7 @@ test('e2e dist server handles Responses streaming, tools, model aliases, and fal
     });
 
     const toolCall = await proxyResponses(app.baseUrl, {
-      model: 'gpt-5.4',
+      model: 'mimo-v2.5-pro',
       stream: true,
       input: 'check project',
       tools: [{
@@ -281,7 +280,7 @@ test('e2e dist server handles Responses streaming, tools, model aliases, and fal
     });
 
     const continued = await proxyResponses(app.baseUrl, {
-      model: 'gpt-5.4',
+      model: 'mimo-v2.5-pro',
       stream: true,
       previous_response_id: completed.response.id,
       input: [{ type: 'function_call_output', call_id: 'call_e2e', output: 'C:/Users/richa/Documents/mimo-pool' }]
