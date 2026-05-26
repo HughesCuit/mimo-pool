@@ -175,3 +175,33 @@ test('admin models endpoint lists model ids for the selected proxy-compatible ro
     await target.close();
   }
 });
+
+test('admin models endpoint skips probing Anthropic-compatible routes', async () => {
+  let called = false;
+  const target = await upstream((req, res) => {
+    called = true;
+    res.writeHead(404, { 'content-type': 'text/html' });
+    res.end('<html><body>not found</body></html>');
+  });
+  const store = createMemoryStore();
+  await store.updateServiceGroup('CN', { anthropicBaseUrl: target.url });
+  await store.importKeys('CN', ['pool-key']);
+  const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+  const server = await listen(app);
+
+  try {
+    const response = await fetch(`${server.url}/admin/api/models?mode=proxy&apiType=anthropic-messages`, {
+      headers: { authorization: 'Bearer admin-secret' }
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.protocol, 'anthropic');
+    assert.deepEqual(body.models, []);
+    assert.equal(called, false);
+    assert.match(body.raw.message, /do not expose a models endpoint/);
+  } finally {
+    await server.close();
+    await target.close();
+  }
+});

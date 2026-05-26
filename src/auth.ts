@@ -8,8 +8,14 @@ export function getBearerToken(req: IncomingMessage): string | null {
   return match?.[1] ?? null;
 }
 
+export function getApiKeyToken(req: IncomingMessage): string | null {
+  const header = req.headers['x-api-key'];
+  if (!header) return null;
+  return Array.isArray(header) ? header[0] : header;
+}
+
 export function requireToken(req: IncomingMessage, allowedTokens: string[]): boolean {
-  const token = getBearerToken(req);
+  const token = getBearerToken(req) ?? getApiKeyToken(req);
   return Boolean(token && allowedTokens.includes(token));
 }
 

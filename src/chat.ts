@@ -48,6 +48,17 @@ export async function sendAdminChat(store: Store, request: ChatRequest) {
 export async function listAdminModels(store: Store, request: Pick<ChatRequest, 'mode' | 'apiType' | 'keyId'>) {
   const apiType = normalizeApiType(request);
   const protocol = protocolForApiType(apiType);
+  if (protocol === 'anthropic') {
+    return {
+      mode: request.mode === 'direct' ? 'direct' : 'proxy',
+      apiType,
+      protocol,
+      status: 200,
+      models: [],
+      raw: { message: 'Anthropic-compatible APIs usually do not expose a models endpoint.' },
+      target: undefined
+    };
+  }
   const proxyRequest = {
     protocol,
     method: 'GET',

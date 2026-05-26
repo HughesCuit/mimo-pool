@@ -179,6 +179,60 @@ test('app proxies OpenAI models endpoint through the key pool', async () => {
   }
 });
 
+test('app accepts Anthropic x-api-key proxy auth and forwards the real key upstream', async () => {
+  const { createApp } = await import('../src/server.ts');
+  let observedUrl = '';
+  let observedProxyAuth = '';
+  let observedVersion = '';
+  let observedPayload = null;
+  const target = await upstream(async (req, res) => {
+    observedUrl = req.url;
+    observedProxyAuth = req.headers['x-api-key'];
+    observedVersion = req.headers['anthropic-version'];
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'anthropic hello' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { anthropicBaseUrl: `${target.url}/anthropic` });
+    await store.importKeys('CN', ['real-mimo-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/messages`, {
+        method: 'POST',
+        headers: { 'x-api-key': 'proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5-pro',
+          max_tokens: 32,
+          messages: [{ role: 'user', content: 'hi' }]
+        })
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(observedUrl, '/anthropic/v1/messages');
+      assert.equal(observedProxyAuth, 'real-mimo-key');
+      assert.equal(observedVersion, '2023-06-01');
+      assert.equal(observedPayload.model, 'mimo-v2.5-pro');
+      assert.equal(body.content[0].text, 'anthropic hello');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
 test('app maps public OpenAI responses endpoint to chat completions upstream', async () => {
   const { createApp } = await import('../src/server.ts');
   let observedUrl = '';
