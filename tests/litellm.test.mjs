@@ -33,6 +33,20 @@ test('buildLiteLLMConfig exports active keys in route order with fallbacks', asy
   assert.match(config, /additional_drop_params: \["store", "background", "include"/);
 });
 
+test('buildLiteLLMConfig defaults to the native Mimo model only', async () => {
+  const store = createMemoryStore();
+  await store.importKeys('CN', ['cn-key']);
+
+  const config = await buildLiteLLMConfig(store, {
+    masterKey: 'proxy-secret',
+    fallbackAliases: 0
+  });
+
+  assert.match(config, /model_name: "mimo-v2\.5-pro"/);
+  assert.doesNotMatch(config, /model_name: "gpt-/);
+  assert.doesNotMatch(config, /model_name: "codex-/);
+});
+
 test('buildLiteLLMConfig handles empty pools', async () => {
   const store = createMemoryStore();
   await store.updateServiceGroup('CN', { enabled: false });

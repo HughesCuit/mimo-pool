@@ -67,7 +67,7 @@ npm.cmd run debug
 | `DEBUG_PROXY_BODY_LIMIT` | `2000` | 正文预览最大字符数 |
 | `LITELLM_CONFIG_PATH` | `data/litellm-config.yaml` | 实验性 LiteLLM 配置导出路径 |
 | `LITELLM_PORT` | `4000` | `npm run litellm:start` 启动 LiteLLM 的端口 |
-| `LITELLM_PUBLIC_MODELS` | 内置常用模型列表 | 导出给 LiteLLM 的公开模型名，逗号分隔 |
+| `LITELLM_PUBLIC_MODELS` | `mimo-v2.5-pro` | 导出给 LiteLLM 的公开模型名，逗号分隔；建议先只测 Mimo 原生模型 |
 | `LITELLM_UPSTREAM_MODEL` | `mimo-v2.5-pro` | LiteLLM 转发给 Mimo 的真实模型名 |
 | `LITELLM_FALLBACK_ALIASES` | `3` | 为 LiteLLM 生成显式 fallback alias 的层数，避免部分场景不在同组 deployment 间 fallback |
 | `LITELLM_ADDITIONAL_DROP_PARAMS` | 内置 Mimo 清洗列表 | LiteLLM 转发给 Mimo 前额外丢弃的参数，逗号分隔 |
@@ -87,13 +87,13 @@ uv tool install 'litellm[proxy]'
 npm run litellm:start
 ```
 
-默认公开模型包括 `mimo-v2.5-pro`、`gpt-5.4`、`gpt-5`、`gpt-5-mini`、`codex-auto-review` 等，都会映射到 `openai/mimo-v2.5-pro`，并按当前号池顺序写成同一 LiteLLM model group 下的多个 deployment。配置中会启用 `use_chat_completions_api: true`，让 LiteLLM 尝试把 Responses 请求桥接到 Chat Completions。由于 LiteLLM 的 Responses bridge 有时不会在同组 deployment 间自动 fallback，配置生成器还会创建少量显式 fallback alias。客户端可指向 LiteLLM 默认端口测试：
+默认只公开 `mimo-v2.5-pro`，并按当前号池顺序写成同一 LiteLLM model group 下的多个 deployment。配置中会启用 `use_chat_completions_api: true`，让 LiteLLM 尝试把 Responses 请求桥接到 Chat Completions。由于 LiteLLM 的 Responses bridge 有时不会在同组 deployment 间自动 fallback，配置生成器还会创建少量显式 fallback alias。客户端可指向 LiteLLM 默认端口测试：
 
 ```bash
 curl -N http://localhost:4000/v1/responses \
   -H "Authorization: Bearer proxy-secret" \
   -H "Content-Type: application/json" \
-  -d '{"model":"codex-auto-review","stream":true,"input":"hi"}'
+  -d '{"model":"mimo-v2.5-pro","stream":true,"input":"hi"}'
 ```
 
 注意：Mimo 上游没有原生 `/v1/responses`；如果当前 LiteLLM 版本没有正确应用 `use_chat_completions_api`，`/v1/responses` 仍可能直连 Mimo 并得到 404。Web 管理界面仍由 mimo-pool 提供，更新号池后需要重新运行 `npm run litellm:config` 并重启 LiteLLM。

@@ -14,17 +14,7 @@ export type LiteLLMConfigOptions = {
   additionalDropParams?: string[];
 };
 
-const defaultPublicModels = [
-  'mimo-v2.5-pro',
-  'gpt-5.4',
-  'gpt-5',
-  'gpt-5-mini',
-  'gpt-5.1',
-  'gpt-4.1',
-  'codex-auto-review',
-  'codex-mini-latest',
-  'codex-latest'
-];
+const defaultPublicModels = ['mimo-v2.5-pro'];
 
 const defaultAdditionalDropParams = [
   'store',
