@@ -60,11 +60,41 @@ npm.cmd run debug
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic 请求默认版本头 |
 | `MODEL_ALIASES` | `gpt-*:mimo-v2.5-pro,o*:mimo-v2.5-pro,chatgpt-*:mimo-v2.5-pro,codex-*:mimo-v2.5-pro` | OpenAI 模型别名映射，逗号分隔，支持 `*` 通配 |
 | `RESPONSES_SESSION_TTL_MS` | `3600000` | Responses 兼容层记忆 `previous_response_id` 会话的时间 |
-| `RESPONSES_TOOL_NUDGE` | `0` | 设为 `1` 时，在有 tools 的 Responses 请求中追加一条工具调用提示，减少模型只口头回答不调用工具的情况 |
+| `RESPONSES_TOOL_NUDGE` | `1` | 有 tools 的 Responses 请求中追加工具调用提示；设为 `0` 可关闭 |
 | `DEBUG_PROXY` | `0` | 开启代理调试日志 |
 | `DEBUG_PROXY_LOG_FILE` | 空 | 调试日志文件路径，设置后不在控制台刷完整日志 |
 | `DEBUG_PROXY_BODY` | `0` | 输出截断后的请求/响应正文预览 |
 | `DEBUG_PROXY_BODY_LIMIT` | `2000` | 正文预览最大字符数 |
+| `LITELLM_CONFIG_PATH` | `data/litellm-config.yaml` | 实验性 LiteLLM 配置导出路径 |
+| `LITELLM_PORT` | `4000` | `npm run litellm:start` 启动 LiteLLM 的端口 |
+| `LITELLM_PUBLIC_MODELS` | 内置常用模型列表 | 导出给 LiteLLM 的公开模型名，逗号分隔 |
+| `LITELLM_UPSTREAM_MODEL` | `mimo-v2.5-pro` | LiteLLM 转发给 Mimo 的真实模型名 |
+
+## LiteLLM Proxy 实验模式
+
+如果想让 LiteLLM 接管代理层，可以先用当前 SQLite 号池生成 LiteLLM 配置：
+
+```bash
+npm run litellm:config
+```
+
+生成文件默认在 `data/litellm-config.yaml`，里面包含原始 Mimo API key，不要提交。安装 LiteLLM Proxy 后启动：
+
+```bash
+uv tool install 'litellm[proxy]'
+npm run litellm:start
+```
+
+默认公开模型包括 `mimo-v2.5-pro`、`gpt-5.4`、`gpt-5`、`gpt-5-mini`、`codex-auto-review` 等，都会映射到 `openai/mimo-v2.5-pro`，并按当前号池顺序生成 LiteLLM fallback 链。客户端可指向 LiteLLM 默认端口：
+
+```bash
+curl -N http://localhost:4000/v1/responses \
+  -H "Authorization: Bearer proxy-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"codex-auto-review","stream":true,"input":"hi"}'
+```
+
+这个模式是为了对比 LiteLLM 的 `/responses`、工具调用和 fallback 行为；Web 管理界面仍由 mimo-pool 提供，更新号池后需要重新运行 `npm run litellm:config` 并重启 LiteLLM。
 
 ## 调用示例
 
