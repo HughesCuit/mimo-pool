@@ -111,3 +111,16 @@ export function resolveUpstreamUrl(baseUrl: string, path: string, protocol: Prot
   }
   return new URL(`${trimmedBase}${outgoingPath.startsWith('/') ? outgoingPath : `/${outgoingPath}`}`);
 }
+
+export function resolveUpstreamUrls(baseUrl: string, path: string, protocol: Protocol): URL[] {
+  const primary = resolveUpstreamUrl(baseUrl, path, protocol);
+  if (protocol !== 'anthropic') return [primary];
+
+  const trimmedBase = baseUrl.replace(/\/+$/, '');
+  const outgoingPath = stripProtocolPrefix(protocol, path);
+  if (outgoingPath === '/v1/messages') {
+    const fallback = new URL(`${trimmedBase}/messages`);
+    if (fallback.href !== primary.href) return [primary, fallback];
+  }
+  return [primary];
+}

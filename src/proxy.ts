@@ -1,4 +1,4 @@
-import { buildRoutePlan, classifyUpstreamFailure, clearKeyCooldown, resolveUpstreamUrl, setKeyCooldown } from './routing.ts';
+import { buildRoutePlan, classifyUpstreamFailure, clearKeyCooldown, resolveUpstreamUrl, resolveUpstreamUrls, setKeyCooldown } from './routing.ts';
 import { debugBody, debugLog, type DebugContext } from './debug.ts';
 import type { Protocol, Store } from './types.ts';
 
@@ -33,65 +33,74 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
   let lastError: Error | null = null;
 
   for (const target of plan) {
-    const url = resolveUpstreamUrl(target.baseUrl, request.path, request.protocol);
-    debugLog(request.debug, 'proxy.upstream_attempt', {
-      url: safeUrl(url),
-      target: compactTarget(target),
-      ...debugBody('requestBody', request.body)
-    });
-    try {
-      const response = await fetch(url, {
-        method: request.method,
-        headers: upstreamHeaders(request.protocol, request.headers, target.apiKey, request.body.length),
-        body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(request.body),
-        signal: AbortSignal.timeout(Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120000))
-      });
-      const body = Buffer.from(await response.arrayBuffer());
-      const headers = headersObject(response.headers);
-      debugLog(request.debug, 'proxy.upstream_response', {
-        status: response.status,
-        ok: response.ok,
+    const outgoingBody = upstreamBody(request.protocol, request.body);
+    const urls = resolveUpstreamUrls(target.baseUrl, request.path, request.protocol);
+    for (const [urlIndex, url] of urls.entries()) {
+      debugLog(request.debug, 'proxy.upstream_attempt', {
+        url: safeUrl(url),
         target: compactTarget(target),
-        ...debugBody('responseBody', body)
+        ...debugBody('requestBody', outgoingBody)
       });
+      try {
+        const response = await fetch(url, {
+          method: request.method,
+          headers: upstreamHeaders(request.protocol, request.headers, target.apiKey, outgoingBody.length),
+          body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(outgoingBody),
+          signal: AbortSignal.timeout(Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120000))
+        });
+        const body = Buffer.from(await response.arrayBuffer());
+        const headers = headersObject(response.headers);
+        debugLog(request.debug, 'proxy.upstream_response', {
+          status: response.status,
+          ok: response.ok,
+          target: compactTarget(target),
+          ...debugBody('responseBody', body)
+        });
 
-      if (response.ok) {
-        await store.recordKeySuccess(target.keyId);
-        clearKeyCooldown(target.keyId);
+        if (response.ok) {
+          await store.recordKeySuccess(target.keyId);
+          clearKeyCooldown(target.keyId);
+          return { status: response.status, headers, body, target: compactTarget(target) };
+        }
+
+        const failure = classifyUpstreamFailure(response.status, body.toString('utf8'));
+        if (failure === 'client' && request.protocol === 'anthropic' && response.status === 404 && urlIndex < urls.length - 1) {
+          debugLog(request.debug, 'proxy.anthropic_path_fallback', { target: compactTarget(target), status: response.status });
+          lastResult = { status: response.status, headers, body, target: compactTarget(target) };
+          continue;
+        }
+        if (failure === 'exhausted') {
+          await store.markKeyExhausted(target.keyId, summarizeError(response.status, body));
+          debugLog(request.debug, 'proxy.key_exhausted', { target: compactTarget(target), status: response.status });
+          lastResult = { status: response.status, headers, body, target: compactTarget(target) };
+          break;
+        }
+        if (failure === 'cooldown') {
+          await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
+          const cooldownUntil = setKeyCooldown(target.keyId);
+          debugLog(request.debug, 'proxy.key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
+          lastResult = { status: response.status, headers, body, target: compactTarget(target) };
+          break;
+        }
+        if (failure === 'retryable') {
+          await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
+          const cooldownUntil = setKeyCooldown(target.keyId);
+          debugLog(request.debug, 'proxy.retryable_failure', { target: compactTarget(target), status: response.status });
+          debugLog(request.debug, 'proxy.key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
+          lastResult = { status: response.status, headers, body, target: compactTarget(target) };
+          break;
+        }
+
+        await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
         return { status: response.status, headers, body, target: compactTarget(target) };
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        debugLog(request.debug, 'proxy.upstream_error', { target: compactTarget(target), error: lastError.message });
+        if (urlIndex < urls.length - 1) continue;
+        await store.recordKeyFailure(target.keyId, lastError.message);
+        setKeyCooldown(target.keyId);
+        break;
       }
-
-      const failure = classifyUpstreamFailure(response.status, body.toString('utf8'));
-      if (failure === 'exhausted') {
-        await store.markKeyExhausted(target.keyId, summarizeError(response.status, body));
-        debugLog(request.debug, 'proxy.key_exhausted', { target: compactTarget(target), status: response.status });
-        lastResult = { status: response.status, headers, body, target: compactTarget(target) };
-        continue;
-      }
-      if (failure === 'cooldown') {
-        await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
-        const cooldownUntil = setKeyCooldown(target.keyId);
-        debugLog(request.debug, 'proxy.key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
-        lastResult = { status: response.status, headers, body, target: compactTarget(target) };
-        continue;
-      }
-      if (failure === 'retryable') {
-        await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
-        const cooldownUntil = setKeyCooldown(target.keyId);
-        debugLog(request.debug, 'proxy.retryable_failure', { target: compactTarget(target), status: response.status });
-        debugLog(request.debug, 'proxy.key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
-        lastResult = { status: response.status, headers, body, target: compactTarget(target) };
-        continue;
-      }
-
-      await store.recordKeyFailure(target.keyId, summarizeError(response.status, body));
-      return { status: response.status, headers, body, target: compactTarget(target) };
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      debugLog(request.debug, 'proxy.upstream_error', { target: compactTarget(target), error: lastError.message });
-      await store.recordKeyFailure(target.keyId, lastError.message);
-      setKeyCooldown(target.keyId);
-      continue;
     }
   }
 
@@ -110,11 +119,12 @@ export async function directCompatibleRequest(store: Store, request: ProxyReques
   }
   const baseUrl = request.protocol === 'openai' ? group.openaiBaseUrl : group.anthropicBaseUrl;
   const url = resolveUpstreamUrl(baseUrl, request.path, request.protocol);
+  const outgoingBody = upstreamBody(request.protocol, request.body);
   debugLog(request.debug, 'proxy.direct_attempt', { url: safeUrl(url), target: { groupCode: key.groupCode, keyId: key.id, maskedKey: key.maskedKey } });
   const response = await fetch(url, {
     method: request.method,
-    headers: upstreamHeaders(request.protocol, request.headers, key.apiKey, request.body.length),
-    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(request.body),
+    headers: upstreamHeaders(request.protocol, request.headers, key.apiKey, outgoingBody.length),
+    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(outgoingBody),
     signal: AbortSignal.timeout(Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120000))
   });
   const body = Buffer.from(await response.arrayBuffer());
@@ -142,67 +152,76 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
   let lastError: Error | null = null;
 
   for (const target of plan) {
-    const url = resolveUpstreamUrl(target.baseUrl, request.path, request.protocol);
-    debugLog(request.debug, 'proxy.stream_upstream_attempt', {
-      url: safeUrl(url),
-      target: compactTarget(target),
-      ...debugBody('requestBody', request.body)
-    });
-    try {
-      const response = await fetch(url, {
-        method: request.method,
-        headers: upstreamHeaders(request.protocol, request.headers, target.apiKey, request.body.length),
-        body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(request.body),
-        signal: streamAbortSignal()
-      }) as Response & { targetMeta?: { groupCode: string; keyId: number; maskedKey: string } };
-
-      if (response.ok) {
-        await store.recordKeySuccess(target.keyId);
-        clearKeyCooldown(target.keyId);
-        response.targetMeta = compactTarget(target);
-        debugLog(request.debug, 'proxy.stream_upstream_open', { status: response.status, target: compactTarget(target) });
-        return response;
-      }
-
-      const preview = Buffer.from(await response.clone().arrayBuffer());
-      debugLog(request.debug, 'proxy.stream_upstream_response', {
-        status: response.status,
-        ok: false,
+    const outgoingBody = upstreamBody(request.protocol, request.body);
+    const urls = resolveUpstreamUrls(target.baseUrl, request.path, request.protocol);
+    for (const [urlIndex, url] of urls.entries()) {
+      debugLog(request.debug, 'proxy.stream_upstream_attempt', {
+        url: safeUrl(url),
         target: compactTarget(target),
-        ...debugBody('responseBody', preview)
+        ...debugBody('requestBody', outgoingBody)
       });
-      const failure = classifyUpstreamFailure(response.status, preview.toString('utf8'));
-      if (failure === 'exhausted') {
-        await store.markKeyExhausted(target.keyId, summarizeError(response.status, preview));
-        debugLog(request.debug, 'proxy.stream_key_exhausted', { target: compactTarget(target), status: response.status });
-        lastResponse = response;
-        continue;
-      }
-      if (failure === 'cooldown') {
-        await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
-        const cooldownUntil = setKeyCooldown(target.keyId);
-        debugLog(request.debug, 'proxy.stream_key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
-        lastResponse = response;
-        continue;
-      }
-      if (failure === 'retryable') {
-        await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
-        const cooldownUntil = setKeyCooldown(target.keyId);
-        debugLog(request.debug, 'proxy.stream_retryable_failure', { target: compactTarget(target), status: response.status });
-        debugLog(request.debug, 'proxy.stream_key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
-        lastResponse = response;
-        continue;
-      }
+      try {
+        const response = await fetch(url, {
+          method: request.method,
+          headers: upstreamHeaders(request.protocol, request.headers, target.apiKey, outgoingBody.length),
+          body: request.method === 'GET' || request.method === 'HEAD' ? undefined : new Uint8Array(outgoingBody),
+          signal: streamAbortSignal()
+        }) as Response & { targetMeta?: { groupCode: string; keyId: number; maskedKey: string } };
 
-      await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
-      response.targetMeta = compactTarget(target);
-      return response;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      debugLog(request.debug, 'proxy.stream_upstream_error', { target: compactTarget(target), error: lastError.message });
-      await store.recordKeyFailure(target.keyId, lastError.message);
-      setKeyCooldown(target.keyId);
-      continue;
+        if (response.ok) {
+          await store.recordKeySuccess(target.keyId);
+          clearKeyCooldown(target.keyId);
+          response.targetMeta = compactTarget(target);
+          debugLog(request.debug, 'proxy.stream_upstream_open', { status: response.status, target: compactTarget(target) });
+          return response;
+        }
+
+        const preview = Buffer.from(await response.clone().arrayBuffer());
+        debugLog(request.debug, 'proxy.stream_upstream_response', {
+          status: response.status,
+          ok: false,
+          target: compactTarget(target),
+          ...debugBody('responseBody', preview)
+        });
+        const failure = classifyUpstreamFailure(response.status, preview.toString('utf8'));
+        if (failure === 'client' && request.protocol === 'anthropic' && response.status === 404 && urlIndex < urls.length - 1) {
+          debugLog(request.debug, 'proxy.stream_anthropic_path_fallback', { target: compactTarget(target), status: response.status });
+          lastResponse = response;
+          continue;
+        }
+        if (failure === 'exhausted') {
+          await store.markKeyExhausted(target.keyId, summarizeError(response.status, preview));
+          debugLog(request.debug, 'proxy.stream_key_exhausted', { target: compactTarget(target), status: response.status });
+          lastResponse = response;
+          break;
+        }
+        if (failure === 'cooldown') {
+          await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
+          const cooldownUntil = setKeyCooldown(target.keyId);
+          debugLog(request.debug, 'proxy.stream_key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
+          lastResponse = response;
+          break;
+        }
+        if (failure === 'retryable') {
+          await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
+          const cooldownUntil = setKeyCooldown(target.keyId);
+          debugLog(request.debug, 'proxy.stream_retryable_failure', { target: compactTarget(target), status: response.status });
+          debugLog(request.debug, 'proxy.stream_key_cooldown', { target: compactTarget(target), status: response.status, cooldownUntil });
+          lastResponse = response;
+          break;
+        }
+
+        await store.recordKeyFailure(target.keyId, summarizeError(response.status, preview));
+        response.targetMeta = compactTarget(target);
+        return response;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        debugLog(request.debug, 'proxy.stream_upstream_error', { target: compactTarget(target), error: lastError.message });
+        if (urlIndex < urls.length - 1) continue;
+        await store.recordKeyFailure(target.keyId, lastError.message);
+        setKeyCooldown(target.keyId);
+        break;
+      }
     }
   }
 
@@ -235,6 +254,25 @@ function upstreamHeaders(protocol: Protocol, incoming: ProxyRequest['headers'], 
     headers.set('authorization', `Bearer ${apiKey}`);
   }
   return headers;
+}
+
+function upstreamBody(protocol: Protocol, body: Buffer): Buffer {
+  if (protocol !== 'anthropic' || body.length === 0) return body;
+  try {
+    const parsed = JSON.parse(body.toString('utf8')) as { model?: unknown };
+    if (typeof parsed.model !== 'string') return body;
+    const model = normalizeAnthropicModel(parsed.model);
+    if (model === parsed.model) return body;
+    return Buffer.from(JSON.stringify({ ...parsed, model }));
+  } catch {
+    return body;
+  }
+}
+
+function normalizeAnthropicModel(model: string): string {
+  const cleaned = model.replace(/\u001b\[[0-9;]*m/g, '').trim();
+  if (cleaned === 'mimo-v2.5') return 'mimo-v2.5-pro';
+  return cleaned;
 }
 
 function headersObject(headers: Headers): Record<string, string> {

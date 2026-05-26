@@ -181,12 +181,18 @@ test('app proxies OpenAI models endpoint through the key pool', async () => {
 
 test('app accepts Anthropic x-api-key proxy auth and forwards the real key upstream', async () => {
   const { createApp } = await import('../src/server.ts');
-  let observedUrl = '';
+  const observedUrls = [];
   let observedProxyAuth = '';
   let observedVersion = '';
   let observedPayload = null;
   const target = await upstream(async (req, res) => {
-    observedUrl = req.url;
+    observedUrls.push(req.url);
+    if (req.url === '/anthropic/v1/messages') {
+      req.resume();
+      res.writeHead(404, { 'content-type': 'text/html' });
+      res.end('<html><body>not found</body></html>');
+      return;
+    }
     observedProxyAuth = req.headers['x-api-key'];
     observedVersion = req.headers['anthropic-version'];
     const chunks = [];
@@ -212,7 +218,7 @@ test('app accepts Anthropic x-api-key proxy auth and forwards the real key upstr
         method: 'POST',
         headers: { 'x-api-key': 'proxy-secret', 'content-type': 'application/json' },
         body: JSON.stringify({
-          model: 'mimo-v2.5-pro',
+          model: 'mimo-v2.5-pro\u001b[1m',
           max_tokens: 32,
           messages: [{ role: 'user', content: 'hi' }]
         })
@@ -220,11 +226,56 @@ test('app accepts Anthropic x-api-key proxy auth and forwards the real key upstr
       const body = await response.json();
 
       assert.equal(response.status, 200);
-      assert.equal(observedUrl, '/anthropic/v1/messages');
+      assert.deepEqual(observedUrls, ['/anthropic/v1/messages', '/anthropic/messages']);
       assert.equal(observedProxyAuth, 'real-mimo-key');
       assert.equal(observedVersion, '2023-06-01');
       assert.equal(observedPayload.model, 'mimo-v2.5-pro');
       assert.equal(body.content[0].text, 'anthropic hello');
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await target.close();
+  }
+});
+
+test('app maps Anthropic mimo-v2.5 model alias to mimo-v2.5-pro upstream', async () => {
+  const { createApp } = await import('../src/server.ts');
+  let observedPayload = null;
+  const target = await upstream(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'msg_2',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'alias ok' }]
+    }));
+  });
+
+  try {
+    const store = createMemoryStore();
+    await store.updateServiceGroup('CN', { anthropicBaseUrl: `${target.url}/anthropic` });
+    await store.importKeys('CN', ['real-mimo-key']);
+    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
+    const server = await listen(app);
+    try {
+      const response = await fetch(`${server.url}/v1/messages`, {
+        method: 'POST',
+        headers: { 'x-api-key': 'proxy-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'mimo-v2.5',
+          max_tokens: 32,
+          messages: [{ role: 'user', content: 'hi' }]
+        })
+      });
+      const body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(observedPayload.model, 'mimo-v2.5-pro');
+      assert.equal(body.content[0].text, 'alias ok');
     } finally {
       await server.close();
     }
