@@ -179,86 +179,6 @@ test('app proxies OpenAI models endpoint through the key pool', async () => {
   }
 });
 
-test('OpenAI proxy maps configured model aliases upstream and restores response model', async () => {
-  const { createApp } = await import('../src/server.ts');
-  const previousAliases = process.env.MODEL_ALIASES;
-  process.env.MODEL_ALIASES = 'gpt-5.4:mimo-v2.5-pro,gpt-*:mimo-v2.5-pro';
-  let observedPayload = null;
-  const target = await upstream(async (req, res) => {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      id: 'chatcmpl-alias',
-      object: 'chat.completion',
-      model: 'mimo-v2.5-pro',
-      choices: [{ message: { role: 'assistant', content: 'alias ok' }, finish_reason: 'stop' }]
-    }));
-  });
-
-  try {
-    const store = createMemoryStore();
-    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
-    await store.importKeys('CN', ['alias-key']);
-    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
-    const server = await listen(app);
-    try {
-      const response = await fetch(`${server.url}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'gpt-5.4', messages: [{ role: 'user', content: 'hi' }] })
-      });
-      const body = await response.json();
-
-      assert.equal(response.status, 200);
-      assert.equal(observedPayload.model, 'mimo-v2.5-pro');
-      assert.equal(body.model, 'gpt-5.4');
-    } finally {
-      await server.close();
-    }
-  } finally {
-    if (previousAliases === undefined) delete process.env.MODEL_ALIASES;
-    else process.env.MODEL_ALIASES = previousAliases;
-    await target.close();
-  }
-});
-
-test('OpenAI models endpoint includes configured model aliases', async () => {
-  const { createApp } = await import('../src/server.ts');
-  const previousAliases = process.env.MODEL_ALIASES;
-  process.env.MODEL_ALIASES = 'gpt-5.4:mimo-v2.5-pro,gpt-5:mimo-v2.5-pro';
-  const target = await upstream((req, res) => {
-    req.resume();
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ object: 'list', data: [{ id: 'mimo-v2.5-pro', object: 'model' }] }));
-  });
-
-  try {
-    const store = createMemoryStore();
-    await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
-    await store.importKeys('CN', ['alias-model-key']);
-    const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
-    const server = await listen(app);
-    try {
-      const response = await fetch(`${server.url}/v1/models`, {
-        headers: { authorization: 'Bearer proxy-secret' }
-      });
-      const body = await response.json();
-      const ids = body.data.map((model) => model.id);
-
-      assert.equal(response.status, 200);
-      assert.deepEqual(ids.sort(), ['gpt-5', 'gpt-5.4', 'mimo-v2.5-pro'].sort());
-    } finally {
-      await server.close();
-    }
-  } finally {
-    if (previousAliases === undefined) delete process.env.MODEL_ALIASES;
-    else process.env.MODEL_ALIASES = previousAliases;
-    await target.close();
-  }
-});
-
 test('app maps public OpenAI responses endpoint to chat completions upstream', async () => {
   const { createApp } = await import('../src/server.ts');
   let observedUrl = '';
@@ -365,28 +285,27 @@ test('app maps streamed chat completion SSE into responses SSE instead of parsin
   }
 });
 
-test('streaming OpenAI responses applies default gpt model alias before upstream request', async () => {
+test('streaming responses keep downstream alive during reasoning-only upstream chunks', async () => {
   const { createApp } = await import('../src/server.ts');
-  let observedPayload = null;
   const target = await upstream((req, res) => {
-    const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    req.resume();
     req.on('end', () => {
-      observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.end([
-        'data:{"id":"chatcmpl-alias-stream","model":"mimo-v2.5-pro","choices":[{"finish_reason":"stop","index":0,"message":{"content":"alias stream ok","role":"assistant"}}]}',
-        '',
-        'data:[DONE]',
-        ''
-      ].join('\n'));
+      res.write('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"reasoning_content":"thinking one"}}]}\n\n');
+      setTimeout(() => {
+        res.write('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"reasoning_content":"thinking two"}}]}\n\n');
+      }, 5);
+      setTimeout(() => {
+        res.write('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"delta":{"content":"visible"}}]}\n\n');
+        res.end('data:{"id":"chatcmpl-reasoning","model":"mimo-v2.5-pro","choices":[{"index":0,"finish_reason":"stop"}]}\n\ndata:[DONE]\n\n');
+      }, 10);
     });
   });
 
   try {
     const store = createMemoryStore();
     await store.updateServiceGroup('CN', { openaiBaseUrl: `${target.url}/v1` });
-    await store.importKeys('CN', ['stream-alias-key']);
+    await store.importKeys('CN', ['reasoning-key']);
     const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
     const server = await listen(app);
     try {
@@ -394,17 +313,17 @@ test('streaming OpenAI responses applies default gpt model alias before upstream
         method: 'POST',
         headers: { authorization: 'Bearer proxy-secret', 'content-type': 'application/json' },
         body: JSON.stringify({
-          model: 'gpt-5.4',
-          input: 'hello',
+          model: 'mimo-v2.5-pro',
+          input: 'think first',
           stream: true
         })
       });
       const text = await response.text();
 
       assert.equal(response.status, 200);
-      assert.equal(observedPayload.model, 'mimo-v2.5-pro');
-      assert.match(text, /"model":"gpt-5.4"/);
-      assert.match(text, /alias stream ok/);
+      assert.match(text, /: mimo-pool reasoning keepalive/);
+      assert.match(text, /"delta":"visible"/);
+      assert.match(text, /event: response\.completed/);
     } finally {
       await server.close();
     }
@@ -607,6 +526,7 @@ test('responses adapter forwards tools and continues tool calls with function_ca
       assert.equal(first.status, 200);
       assert.equal(call.name, 'exec');
       assert.equal(call.call_id, 'call_native_1');
+      assert.equal(observedPayloads[0].messages.some((message) => message.role === 'system' && message.content.includes('MUST call the provided tool')), true);
       assert.deepEqual(observedPayloads[0].tools, [{
         type: 'function',
         function: {
@@ -621,7 +541,8 @@ test('responses adapter forwards tools and continues tool calls with function_ca
       }]);
       assert.equal(observedPayloads[0].tool_choice, 'required');
       assert.equal(second.status, 200);
-      assert.deepEqual(observedPayloads[1].messages, [
+      assert.equal(observedPayloads[1].messages.some((message) => message.role === 'system' && message.content.includes('previous message is a tool result')), true);
+      assert.deepEqual(observedPayloads[1].messages.filter((message) => message.role !== 'system'), [
         { role: 'user', content: 'check project' },
         { role: 'assistant', content: null, tool_calls: [{
           id: 'call_native_1',
@@ -773,7 +694,8 @@ test('responses adapter converts full input function_call history without previo
       const body = await response.json();
 
       assert.equal(response.status, 200);
-      assert.deepEqual(observedPayload.messages, [
+      assert.equal(observedPayload.messages.some((message) => message.role === 'system' && message.content.includes('MUST call the provided tool')), true);
+      assert.deepEqual(observedPayload.messages.filter((message) => message.role !== 'system'), [
         { role: 'user', content: 'inspect project' },
         { role: 'assistant', content: null, tool_calls: [{
           id: 'call_exec_1',
@@ -862,7 +784,9 @@ test('streaming responses adapter remembers tool calls for the next function out
       assert.ok(responseId);
       assert.ok(callId);
       assert.equal(second.status, 200);
-      assert.deepEqual(observedPayloads[1].messages, [
+      assert.equal(observedPayloads[1].messages.filter((message) => message.role === 'system').length, 2);
+      assert.equal(observedPayloads[1].messages.some((message) => message.role === 'system' && message.content.includes('previous message is a tool result')), true);
+      assert.deepEqual(observedPayloads[1].messages.filter((message) => message.role !== 'system'), [
         { role: 'user', content: 'where am I' },
         { role: 'assistant', content: null, tool_calls: [{
           id: callId,
@@ -1182,6 +1106,7 @@ test('debug mode logs proxy request flow without leaking raw API keys', async ()
       assert.match(text, /proxy\.request_start/);
       assert.match(text, /proxy\.upstream_attempt/);
       assert.match(text, /responses\.compat_response/);
+      assert.match(text, /topLevelKeys/);
       assert.match(text, /tp-d\.\.\.3456/);
       assert.doesNotMatch(text, /tp-debug-secret-key-123456/);
       assert.doesNotMatch(text, /Bearer proxy-secret/);

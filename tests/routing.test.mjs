@@ -47,6 +47,21 @@ test('buildRoutePlan skips keys in temporary cooldown', async () => {
   clearAllCooldownsForTests();
 });
 
+test('buildRoutePlan falls back to cooled keys when every active key is cooling', async () => {
+  clearAllCooldownsForTests();
+  const store = createMemoryStore();
+  const now = Date.now();
+  const [first] = await store.importKeys('CN', ['first-key']);
+  const [second] = await store.importKeys('CN', ['second-key']);
+  setKeyCooldown(first.id, now);
+  setKeyCooldown(second.id, now + 1000);
+
+  const plan = await buildRoutePlan(store, 'openai');
+
+  assert.deepEqual(plan.map((target) => target.apiKey), ['first-key', 'second-key']);
+  clearAllCooldownsForTests();
+});
+
 test('classifyUpstreamFailure conservatively identifies exhausted keys', () => {
   assert.equal(classifyUpstreamFailure(429, '{"error":{"message":"rate limit exceeded"}}'), 'cooldown');
   assert.equal(classifyUpstreamFailure(400, '{"error":"insufficient balance"}'), 'exhausted');

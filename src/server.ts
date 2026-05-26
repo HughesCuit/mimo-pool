@@ -1,4 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import { once } from 'node:events';
 import { adminHtml } from './admin-ui.ts';
 import { parseTokenList, requireToken } from './auth.ts';
 import { listAdminModels, sendAdminChat, type ChatRequest } from './chat.ts';
@@ -6,7 +7,6 @@ import { readBody, readJson, sendError, sendJson, sendText } from './http.ts';
 import { NoAvailableKeysError, prepareStreamingProxy, proxyCompatibleRequest } from './proxy.ts';
 import { createResponsesSseTransformer, isStreamingResponsesRequest, proxyResponsesViaChatCompletions, responsesChatProxyRequest } from './responses-compat.ts';
 import { createDebugContext, debugBody, debugLog } from './debug.ts';
-import { addModelAliasesToList, applyModelAlias, restoreModelAlias } from './model-alias.ts';
 import type { KeyStatus, Protocol, Store } from './types.ts';
 
 export type ServerOptions = {
@@ -146,15 +146,12 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
     return;
   }
   const wantsStream = bodyIncludesStreamTrue(body);
-  const alias = protocol === 'openai' && req.method !== 'GET' && req.method !== 'HEAD'
-    ? applyModelAlias(body, debug)
-    : { body };
   const proxyRequest = {
     protocol,
     method: req.method ?? 'POST',
     path,
     headers: req.headers,
-    body: alias.body,
+    body,
     debug
   };
 
@@ -188,12 +185,9 @@ async function handleProxy(store: Store, protocol: Protocol, req: IncomingMessag
     }
 
     const result = await proxyCompatibleRequest(store, proxyRequest);
-    const responseBody = protocol === 'openai' && path === '/v1/models'
-      ? addModelAliasesToList(result.body)
-      : restoreModelAlias(result.body, alias.originalModel, alias.upstreamModel, debug);
     res.writeHead(result.status, responseHeaders(result.headers));
-    res.end(responseBody);
-    debugLog(debug, 'proxy.request_end', { status: result.status, target: result.target, ...debugBody('responseBody', responseBody) });
+    res.end(result.body);
+    debugLog(debug, 'proxy.request_end', { status: result.status, target: result.target, ...debugBody('responseBody', result.body) });
     return;
   } catch (error) {
     debugLog(debug, 'proxy.request_error', { error: error instanceof Error ? error.message : String(error) });
@@ -231,8 +225,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
     }
     const transformer = createResponsesSseTransformer(proxyRequest.fallbackModel, {
       requestMessages: proxyRequest.chatMessages,
-      debug,
-      modelOverride: proxyRequest.originalModel
+      debug
     });
     const reader = upstream.body.getReader();
     let downstreamChunks = 0;
@@ -246,7 +239,11 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
           if (converted) {
             downstreamChunks += 1;
             downstreamBytes += Buffer.byteLength(converted);
-            res.write(converted);
+            await writeResponseChunk(res, converted);
+          } else {
+            downstreamChunks += 1;
+            downstreamBytes += Buffer.byteLength(responseStreamKeepalive);
+            await writeResponseChunk(res, responseStreamKeepalive);
           }
         }
       }
@@ -254,7 +251,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       if (tail) {
         downstreamChunks += 1;
         downstreamBytes += Buffer.byteLength(tail);
-        res.write(tail);
+        await writeResponseChunk(res, tail);
       }
     } catch (error) {
       if (error instanceof StreamIdleTimeoutError) {
@@ -267,7 +264,7 @@ async function handleResponsesStreamingProxy(store: Store, body: Buffer, req: In
       if (failure) {
         downstreamChunks += 1;
         downstreamBytes += Buffer.byteLength(failure);
-        res.write(failure);
+        await writeResponseChunk(res, failure);
       }
     }
     res.end();
@@ -291,6 +288,13 @@ class StreamIdleTimeoutError extends Error {
     super(`Upstream stream produced no data for ${timeoutMs}ms`);
     this.name = 'StreamIdleTimeoutError';
   }
+}
+
+const responseStreamKeepalive = ': mimo-pool keepalive\n\n';
+
+async function writeResponseChunk(res: ServerResponse, chunk: string | Buffer): Promise<void> {
+  if (res.write(chunk)) return;
+  await once(res, 'drain');
 }
 
 async function readWithStreamIdleTimeout(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {

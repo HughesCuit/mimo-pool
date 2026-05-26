@@ -1,6 +1,5 @@
 import { proxyCompatibleRequest, type ProxyRequest, type ProxyResult } from './proxy.ts';
 import { debugBody, debugLog, type DebugContext } from './debug.ts';
-import { applyModelAlias, restoreModelAlias } from './model-alias.ts';
 import type { Store } from './types.ts';
 
 type ResponsesRequest = {
@@ -42,13 +41,12 @@ const defaultResponseSessionTtlMs = 60 * 60 * 1000;
 export async function proxyResponsesViaChatCompletions(store: Store, body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): Promise<ProxyResult> {
   const request = parseResponsesRequest(body);
   const chatPayload = responsesToChatPayload(request);
-  const aliased = applyModelAlias(Buffer.from(JSON.stringify(chatPayload)), debug);
   debugLog(debug, 'responses.compat_request', {
     chatMessageCount: chatPayload.messages.length,
     hasPreviousResponse: Boolean(request.previous_response_id),
     toolCount: request.tools?.length ?? 0
   });
-  const result = await proxyCompatibleRequest(store, { ...responsesChatProxyRequestFromBody(aliased.body, headers), debug });
+  const result = await proxyCompatibleRequest(store, { ...responsesChatProxyRequestFromPayload(chatPayload, headers), debug });
 
   if (result.status < 200 || result.status >= 300) return result;
 
@@ -61,7 +59,7 @@ export async function proxyResponsesViaChatCompletions(store: Store, body: Buffe
   }
 
   const chatBody = parseJson(result.body);
-  const response = chatCompletionToResponse(chatBody, aliased.originalModel ?? request.model ?? chatPayload.model);
+  const response = chatCompletionToResponse(chatBody, request.model ?? chatPayload.model);
   rememberResponse(response.id, chatPayload.messages, response.output);
   debugLog(debug, 'responses.compat_response', {
     responseId: response.id,
@@ -73,7 +71,7 @@ export async function proxyResponsesViaChatCompletions(store: Store, body: Buffe
   return {
     ...result,
     headers: { ...result.headers, 'content-type': 'application/json' },
-    body: restoreModelAlias(Buffer.from(JSON.stringify(response)), aliased.originalModel, aliased.upstreamModel, debug)
+    body: Buffer.from(JSON.stringify(response))
   };
 }
 
@@ -85,21 +83,18 @@ export function isStreamingResponsesRequest(body: Buffer): boolean {
   }
 }
 
-export function responsesChatProxyRequest(body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): ProxyRequest & { fallbackModel: string; chatMessages: ChatMessage[]; originalModel?: string; upstreamModel?: string } {
+export function responsesChatProxyRequest(body: Buffer, headers: Record<string, string | string[] | undefined>, debug?: DebugContext): ProxyRequest & { fallbackModel: string; chatMessages: ChatMessage[] } {
   const request = parseResponsesRequest(body);
   const chatPayload = responsesToChatPayload(request);
-  const aliased = applyModelAlias(Buffer.from(JSON.stringify(chatPayload)), debug);
   debugLog(debug, 'responses.stream_compat_request', {
     chatMessageCount: chatPayload.messages.length,
     hasPreviousResponse: Boolean(request.previous_response_id),
     toolCount: request.tools?.length ?? 0
   });
   return {
-    ...responsesChatProxyRequestFromBody(aliased.body, headers),
-    fallbackModel: aliased.originalModel ?? request.model ?? chatPayload.model,
+    ...responsesChatProxyRequestFromPayload(chatPayload, headers),
+    fallbackModel: request.model ?? chatPayload.model,
     chatMessages: chatPayload.messages,
-    originalModel: aliased.originalModel,
-    upstreamModel: aliased.upstreamModel,
     debug
   };
 }
@@ -364,6 +359,10 @@ export function createResponsesSseTransformer(fallbackModel: string, options: { 
         });
       }
       const delta = choice.delta?.content ?? choice.message?.content ?? '';
+      const reasoningDelta = choice.delta?.reasoning_content ?? '';
+      if (reasoningDelta && !delta) {
+        out += sseComment('mimo-pool reasoning keepalive');
+      }
       if (delta) {
         rawText += delta;
         if (!delta.includes('<tool_call>') && !rawText.includes('<tool_call>')) {
@@ -626,6 +625,10 @@ function sse(payload: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
+function sseComment(text: string): string {
+  return `: ${text.replace(/\r?\n/g, ' ')}\n\n`;
+}
+
 function responseObject(id: string, createdAt: number, status: 'in_progress' | 'completed' | 'incomplete', model: string, outputText: string, output: unknown[] | string) {
   return {
     id,
@@ -688,8 +691,9 @@ function responseOutputItems(messageId: string, outputText: string, toolCalls: P
 function rememberResponse(responseId: string, requestMessages: ChatMessage[], output: unknown[]): void {
   const assistant = assistantMessageFromOutput(output);
   if (!assistant) return;
+  const conversationMessages = requestMessages.filter((message) => message.role !== 'system');
   pruneResponseHistories();
-  responseHistories.set(responseId, { messages: [...requestMessages, assistant], expiresAt: Date.now() + responseSessionTtlMs() });
+  responseHistories.set(responseId, { messages: [...conversationMessages, assistant], expiresAt: Date.now() + responseSessionTtlMs() });
   while (responseHistories.size > maxResponseHistories) {
     const oldest = responseHistories.keys().next().value;
     if (!oldest) break;
@@ -830,6 +834,9 @@ function responsesToChatPayload(request: ResponsesRequest) {
   }
   if (shouldAddToolNudge(request)) {
     messages.push({ role: 'system', content: toolNudgeInstruction() });
+    if (hasFunctionCallOutput(request.input)) {
+      messages.push({ role: 'system', content: toolContinuationInstruction() });
+    }
   }
   if (request.previous_response_id) {
     messages.push(...historyMessages(request.previous_response_id));
@@ -860,16 +867,31 @@ function responsesToChatPayload(request: ResponsesRequest) {
 
 function shouldAddToolNudge(request: ResponsesRequest): boolean {
   if (!request.tools?.length) return false;
-  const value = process.env.RESPONSES_TOOL_NUDGE ?? '0';
-  return value === '1' || value === 'true';
+  const value = process.env.RESPONSES_TOOL_NUDGE ?? '1';
+  return value !== '0' && value !== 'false';
 }
 
 function toolNudgeInstruction(): string {
   return [
     'Tool-use compatibility instruction:',
-    'When the user asks you to inspect files, run commands, edit code, test, search the workspace, or otherwise act on the project, call the provided tool instead of only describing what you would do.',
-    'Use the tool_calls/function_call interface provided by the API. Do not print XML, JSON, or pseudo tool calls as plain text.'
+    'When the user asks you to inspect files, run commands, edit code, test, search the workspace, or otherwise act on the project, you MUST call the provided tool instead of only describing what you would do.',
+    'Do not answer with progress narration such as "I will", "Let me", "Starting", "Now I will", or "I am going to" when a tool call is needed.',
+    'Use the tool_calls/function_call interface provided by the API. Do not print XML, JSON, Markdown, or pseudo tool calls as plain text.',
+    'After a tool result, either call the next required tool immediately or give the final answer if no more action is needed.'
   ].join(' ');
+}
+
+function toolContinuationInstruction(): string {
+  return [
+    'The previous message is a tool result.',
+    'If the task is not complete, continue by issuing the next tool call now.',
+    'Do not say what you plan to do next.',
+    'For file creation or edits, call the editing/shell tool with the actual operation instead of explaining that you will create files.'
+  ].join(' ');
+}
+
+function hasFunctionCallOutput(input: unknown): boolean {
+  return Array.isArray(input) && input.some((item) => Boolean(item && typeof item === 'object' && (item as { type?: unknown }).type === 'function_call_output'));
 }
 
 function mergeConsecutiveAssistantToolCalls(messages: ChatMessage[]): ChatMessage[] {

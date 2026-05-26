@@ -14,6 +14,10 @@ export type DebugContext = {
   previousResponseId?: string;
   inputKind?: string;
   toolCount?: number;
+  toolNames?: string[];
+  topLevelKeys?: string[];
+  inputItemCount?: number;
+  messageCount?: number;
 };
 
 let nextRequestId = 1;
@@ -40,7 +44,11 @@ export function createDebugContext(protocol: Protocol, method: string, path: str
     model: parsed.model,
     previousResponseId: parsed.previousResponseId,
     inputKind: parsed.inputKind,
-    toolCount: parsed.toolCount
+    toolCount: parsed.toolCount,
+    toolNames: parsed.toolNames,
+    topLevelKeys: parsed.topLevelKeys,
+    inputItemCount: parsed.inputItemCount,
+    messageCount: parsed.messageCount
   };
 }
 
@@ -59,6 +67,10 @@ export function debugLog(context: DebugContext | undefined, event: string, detai
     previousResponseId: context.previousResponseId,
     inputKind: context.inputKind,
     toolCount: context.toolCount,
+    toolNames: context.toolNames,
+    topLevelKeys: context.topLevelKeys,
+    inputItemCount: context.inputItemCount,
+    messageCount: context.messageCount,
     ...details
   });
   const line = `[mimo-pool:debug] ${JSON.stringify(payload)}`;
@@ -84,7 +96,17 @@ export function debugBody(label: string, body: Buffer | string): Record<string, 
   };
 }
 
-function bodySummary(body: Buffer): { stream: boolean; model?: string; previousResponseId?: string; inputKind?: string; toolCount?: number } {
+function bodySummary(body: Buffer): {
+  stream: boolean;
+  model?: string;
+  previousResponseId?: string;
+  inputKind?: string;
+  toolCount?: number;
+  toolNames?: string[];
+  topLevelKeys?: string[];
+  inputItemCount?: number;
+  messageCount?: number;
+} {
   if (body.length === 0) return { stream: false };
   try {
     const parsed = JSON.parse(body.toString('utf8')) as {
@@ -95,16 +117,36 @@ function bodySummary(body: Buffer): { stream: boolean; model?: string; previousR
       messages?: unknown;
       tools?: unknown[];
     };
+    const topLevelKeys = Object.keys(parsed).sort();
     return {
       stream: parsed.stream === true,
       model: typeof parsed.model === 'string' ? parsed.model : undefined,
       previousResponseId: typeof parsed.previous_response_id === 'string' ? parsed.previous_response_id : undefined,
       inputKind: inputKind(parsed.input, parsed.messages),
-      toolCount: Array.isArray(parsed.tools) ? parsed.tools.length : undefined
+      toolCount: Array.isArray(parsed.tools) ? parsed.tools.length : undefined,
+      toolNames: toolNames(parsed.tools),
+      topLevelKeys,
+      inputItemCount: Array.isArray(parsed.input) ? parsed.input.length : undefined,
+      messageCount: Array.isArray(parsed.messages) ? parsed.messages.length : undefined
     };
   } catch {
     return { stream: false, inputKind: 'unparseable-json' };
   }
+}
+
+function toolNames(tools: unknown[] | undefined): string[] | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  return tools.map((tool, index) => {
+    if (!tool || typeof tool !== 'object') return `#${index}:${typeof tool}`;
+    const record = tool as { type?: unknown; name?: unknown; function?: { name?: unknown } };
+    const type = typeof record.type === 'string' ? record.type : 'unknown';
+    const name = typeof record.name === 'string'
+      ? record.name
+      : typeof record.function?.name === 'string'
+        ? record.function.name
+        : `#${index}`;
+    return `${type}:${name}`;
+  });
 }
 
 function inputKind(input: unknown, messages: unknown): string | undefined {
