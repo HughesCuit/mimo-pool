@@ -16,13 +16,15 @@ test('buildLiteLLMConfig exports active keys in route order with fallbacks', asy
     publicModels: ['gpt-5.4'],
     upstreamModel: 'mimo-v2.5-pro',
     masterKey: 'proxy-secret',
-    requestTimeoutSeconds: 30
+    requestTimeoutSeconds: 30,
+    fallbackAliases: 2
   });
 
   assert.match(config, /model_name: "gpt-5\.4"/);
   assert.equal([...config.matchAll(/model_name: "gpt-5\.4"/g)].length, 2);
+  assert.equal([...config.matchAll(/model_name: "gpt-5\.4__fallback_1"/g)].length, 1);
   assert.doesNotMatch(config, /__mimo_/);
-  assert.match(config, /fallbacks: \[\]/);
+  assert.match(config, /"gpt-5\.4": \["gpt-5\.4__fallback_1"\]/);
   assert.match(config, /api_base: "https:\/\/sgp\.example\/v1"[\s\S]*api_key: "sgp-key"[\s\S]*api_base: "https:\/\/cn\.example\/v1"[\s\S]*api_key: "cn-key"/);
   assert.doesNotMatch(config, /ams-key/);
   assert.match(config, /master_key: "proxy-secret"/);
