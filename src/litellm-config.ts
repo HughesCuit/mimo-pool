@@ -75,6 +75,7 @@ function modelEntry(input: { modelName: string; upstreamModel: string; apiBase: 
     `      model: ${yamlString(`openai/${input.upstreamModel}`)}`,
     `      api_base: ${yamlString(input.apiBase)}`,
     `      api_key: ${yamlString(input.apiKey)}`,
+    '      use_chat_completions_api: true',
     `      timeout: ${Number.isFinite(input.requestTimeoutSeconds) && input.requestTimeoutSeconds > 0 ? input.requestTimeoutSeconds : 120}`
   ];
 }
