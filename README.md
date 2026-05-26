@@ -85,16 +85,16 @@ uv tool install 'litellm[proxy]'
 npm run litellm:start
 ```
 
-默认公开模型包括 `mimo-v2.5-pro`、`gpt-5.4`、`gpt-5`、`gpt-5-mini`、`codex-auto-review` 等，都会映射到 `openai/mimo-v2.5-pro`，并按当前号池顺序生成 LiteLLM fallback 链。客户端可指向 LiteLLM 默认端口：
+默认公开模型包括 `mimo-v2.5-pro`、`gpt-5.4`、`gpt-5`、`gpt-5-mini`、`codex-auto-review` 等，都会映射到 `openai/mimo-v2.5-pro`，并按当前号池顺序写成同一 LiteLLM model group 下的多个 deployment。客户端可指向 LiteLLM 默认端口测试 Chat Completions：
 
 ```bash
-curl -N http://localhost:4000/v1/responses \
+curl -N http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer proxy-secret" \
   -H "Content-Type: application/json" \
-  -d '{"model":"codex-auto-review","stream":true,"input":"hi"}'
+  -d '{"model":"codex-auto-review","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-这个模式是为了对比 LiteLLM 的 `/responses`、工具调用和 fallback 行为；Web 管理界面仍由 mimo-pool 提供，更新号池后需要重新运行 `npm run litellm:config` 并重启 LiteLLM。
+注意：Mimo 上游没有原生 `/v1/responses`，当前内置 Node 代理会把 Responses 转成 Chat Completions；纯 LiteLLM Proxy 会把 `/v1/responses` 直接转给 Mimo 并得到 404。因此这个模式主要用于对比 LiteLLM 的 Chat Completions、工具调用和多 deployment 路由行为。Web 管理界面仍由 mimo-pool 提供，更新号池后需要重新运行 `npm run litellm:config` 并重启 LiteLLM。
 
 ## 调用示例
 

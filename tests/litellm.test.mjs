@@ -20,8 +20,9 @@ test('buildLiteLLMConfig exports active keys in route order with fallbacks', asy
   });
 
   assert.match(config, /model_name: "gpt-5\.4"/);
-  assert.match(config, /model_name: "gpt-5\.4__mimo_2"/);
-  assert.match(config, /"gpt-5\.4": \["gpt-5\.4__mimo_2"\]/);
+  assert.equal([...config.matchAll(/model_name: "gpt-5\.4"/g)].length, 2);
+  assert.doesNotMatch(config, /__mimo_/);
+  assert.match(config, /fallbacks: \[\]/);
   assert.match(config, /api_base: "https:\/\/sgp\.example\/v1"[\s\S]*api_key: "sgp-key"[\s\S]*api_base: "https:\/\/cn\.example\/v1"[\s\S]*api_key: "cn-key"/);
   assert.doesNotMatch(config, /ams-key/);
   assert.match(config, /master_key: "proxy-secret"/);

@@ -42,10 +42,9 @@ export async function buildLiteLLMConfig(store: Store, options: LiteLLMConfigOpt
     lines.push('  []');
   } else {
     for (const publicModel of publicModels) {
-      rows.forEach((row, index) => {
-        const modelName = index === 0 ? publicModel : fallbackModelName(publicModel, index + 1);
+      rows.forEach((row) => {
         lines.push(...modelEntry({
-          modelName,
+          modelName: publicModel,
           upstreamModel,
           apiBase: row.openaiBaseUrl,
           apiKey: row.apiKey,
@@ -56,15 +55,7 @@ export async function buildLiteLLMConfig(store: Store, options: LiteLLMConfigOpt
   }
 
   lines.push('router_settings:');
-  if (rows.length <= 1) {
-    lines.push('  fallbacks: []');
-  } else {
-    lines.push('  fallbacks:');
-    for (const publicModel of publicModels) {
-      const fallbackNames = rows.slice(1).map((_row, index) => fallbackModelName(publicModel, index + 2));
-      lines.push(`    - ${yamlString(publicModel)}: [${fallbackNames.map(yamlString).join(', ')}]`);
-    }
-  }
+  lines.push('  fallbacks: []');
 
   lines.push(
     'litellm_settings:',
@@ -86,10 +77,6 @@ function modelEntry(input: { modelName: string; upstreamModel: string; apiBase: 
     `      api_key: ${yamlString(input.apiKey)}`,
     `      timeout: ${Number.isFinite(input.requestTimeoutSeconds) && input.requestTimeoutSeconds > 0 ? input.requestTimeoutSeconds : 120}`
   ];
-}
-
-function fallbackModelName(publicModel: string, index: number): string {
-  return `${publicModel}__mimo_${index}`;
 }
 
 function parseCsv(value: string | undefined): string[] | undefined {
