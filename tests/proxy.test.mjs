@@ -218,7 +218,7 @@ test('app accepts Anthropic x-api-key proxy auth and forwards the real key upstr
         method: 'POST',
         headers: { 'x-api-key': 'proxy-secret', 'content-type': 'application/json' },
         body: JSON.stringify({
-          model: 'mimo-v2.5-pro\u001b[1m',
+          model: 'mimo-v2.5-pro',
           max_tokens: 32,
           messages: [{ role: 'user', content: 'hi' }]
         })
@@ -239,20 +239,23 @@ test('app accepts Anthropic x-api-key proxy auth and forwards the real key upstr
   }
 });
 
-test('app maps Anthropic mimo-v2.5 model alias to mimo-v2.5-pro upstream', async () => {
+test('app proxies Anthropic count_tokens checks through the key pool', async () => {
   const { createApp } = await import('../src/server.ts');
+  const observedUrls = [];
   let observedPayload = null;
   const target = await upstream(async (req, res) => {
+    observedUrls.push(req.url);
+    if (req.url === '/anthropic/v1/messages/count_tokens') {
+      req.resume();
+      res.writeHead(404, { 'content-type': 'text/html' });
+      res.end('<html><body>not found</body></html>');
+      return;
+    }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     observedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      id: 'msg_2',
-      type: 'message',
-      role: 'assistant',
-      content: [{ type: 'text', text: 'alias ok' }]
-    }));
+    res.end(JSON.stringify({ input_tokens: 12 }));
   });
 
   try {
@@ -262,20 +265,20 @@ test('app maps Anthropic mimo-v2.5 model alias to mimo-v2.5-pro upstream', async
     const app = createApp({ store, adminToken: 'admin-secret', proxyTokens: ['proxy-secret'] });
     const server = await listen(app);
     try {
-      const response = await fetch(`${server.url}/v1/messages`, {
+      const response = await fetch(`${server.url}/v1/messages/count_tokens`, {
         method: 'POST',
         headers: { 'x-api-key': 'proxy-secret', 'content-type': 'application/json' },
         body: JSON.stringify({
           model: 'mimo-v2.5',
-          max_tokens: 32,
           messages: [{ role: 'user', content: 'hi' }]
         })
       });
       const body = await response.json();
 
       assert.equal(response.status, 200);
-      assert.equal(observedPayload.model, 'mimo-v2.5-pro');
-      assert.equal(body.content[0].text, 'alias ok');
+      assert.deepEqual(observedUrls, ['/anthropic/v1/messages/count_tokens', '/anthropic/messages/count_tokens']);
+      assert.equal(observedPayload.model, 'mimo-v2.5');
+      assert.equal(body.input_tokens, 12);
     } finally {
       await server.close();
     }

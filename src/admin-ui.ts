@@ -200,8 +200,14 @@ export const adminHtml = `<!doctype html>
         ...options,
         headers: { 'authorization': 'Bearer ' + state.token, 'content-type': 'application/json', ...(options.headers || {}) }
       });
-      if (!response.ok) throw new Error(await response.text());
-      return response.status === 204 ? null : response.json();
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || response.status + ' ' + response.statusText);
+      if (response.status === 204 || !text) return null;
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        throw new Error('服务端返回了非 JSON 响应：' + text.slice(0, 500));
+      }
     };
 
     const msg = (text, ok = true) => {
@@ -477,6 +483,7 @@ export const adminHtml = `<!doctype html>
           messages: session.messages
         };
         const response = await api('/chat', { method: 'POST', body: JSON.stringify(body) });
+        if (!response) throw new Error('服务端返回空响应');
         session.messages.push({ role: 'assistant', content: response.reply || JSON.stringify(response.raw, null, 2) });
         saveSessions();
         renderMessages();

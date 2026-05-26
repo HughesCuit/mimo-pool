@@ -118,8 +118,9 @@ export function resolveUpstreamUrls(baseUrl: string, path: string, protocol: Pro
 
   const trimmedBase = baseUrl.replace(/\/+$/, '');
   const outgoingPath = stripProtocolPrefix(protocol, path);
-  if (outgoingPath === '/v1/messages') {
-    const fallback = new URL(`${trimmedBase}/messages`);
+  if (outgoingPath === '/v1/messages' || outgoingPath === '/v1/messages/count_tokens') {
+    const fallbackPath = outgoingPath.slice(3);
+    const fallback = new URL(`${trimmedBase}${fallbackPath}`);
     if (fallback.href !== primary.href) return [primary, fallback];
   }
   return [primary];

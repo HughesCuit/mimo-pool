@@ -33,7 +33,7 @@ export async function proxyCompatibleRequest(store: Store, request: ProxyRequest
   let lastError: Error | null = null;
 
   for (const target of plan) {
-    const outgoingBody = upstreamBody(request.protocol, request.body);
+    const outgoingBody = request.body;
     const urls = resolveUpstreamUrls(target.baseUrl, request.path, request.protocol);
     for (const [urlIndex, url] of urls.entries()) {
       debugLog(request.debug, 'proxy.upstream_attempt', {
@@ -119,7 +119,7 @@ export async function directCompatibleRequest(store: Store, request: ProxyReques
   }
   const baseUrl = request.protocol === 'openai' ? group.openaiBaseUrl : group.anthropicBaseUrl;
   const url = resolveUpstreamUrl(baseUrl, request.path, request.protocol);
-  const outgoingBody = upstreamBody(request.protocol, request.body);
+  const outgoingBody = request.body;
   debugLog(request.debug, 'proxy.direct_attempt', { url: safeUrl(url), target: { groupCode: key.groupCode, keyId: key.id, maskedKey: key.maskedKey } });
   const response = await fetch(url, {
     method: request.method,
@@ -152,7 +152,7 @@ export async function prepareStreamingProxy(store: Store, request: ProxyRequest)
   let lastError: Error | null = null;
 
   for (const target of plan) {
-    const outgoingBody = upstreamBody(request.protocol, request.body);
+    const outgoingBody = request.body;
     const urls = resolveUpstreamUrls(target.baseUrl, request.path, request.protocol);
     for (const [urlIndex, url] of urls.entries()) {
       debugLog(request.debug, 'proxy.stream_upstream_attempt', {
@@ -254,25 +254,6 @@ function upstreamHeaders(protocol: Protocol, incoming: ProxyRequest['headers'], 
     headers.set('authorization', `Bearer ${apiKey}`);
   }
   return headers;
-}
-
-function upstreamBody(protocol: Protocol, body: Buffer): Buffer {
-  if (protocol !== 'anthropic' || body.length === 0) return body;
-  try {
-    const parsed = JSON.parse(body.toString('utf8')) as { model?: unknown };
-    if (typeof parsed.model !== 'string') return body;
-    const model = normalizeAnthropicModel(parsed.model);
-    if (model === parsed.model) return body;
-    return Buffer.from(JSON.stringify({ ...parsed, model }));
-  } catch {
-    return body;
-  }
-}
-
-function normalizeAnthropicModel(model: string): string {
-  const cleaned = model.replace(/\u001b\[[0-9;]*m/g, '').trim();
-  if (cleaned === 'mimo-v2.5') return 'mimo-v2.5-pro';
-  return cleaned;
 }
 
 function headersObject(headers: Headers): Record<string, string> {
