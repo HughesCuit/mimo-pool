@@ -11,6 +11,7 @@ export type LiteLLMConfigOptions = {
   masterKey?: string;
   requestTimeoutSeconds?: number;
   fallbackAliases?: number;
+  additionalDropParams?: string[];
 };
 
 const defaultPublicModels = [
@@ -25,12 +26,29 @@ const defaultPublicModels = [
   'codex-latest'
 ];
 
+const defaultAdditionalDropParams = [
+  'store',
+  'background',
+  'include',
+  'metadata',
+  'reasoning',
+  'truncation',
+  'text',
+  'top_logprobs',
+  'parallel_tool_calls',
+  'tool_choice.type',
+  'tools[*].strict',
+  'tools[*].annotations',
+  'tools[*].metadata'
+];
+
 export async function buildLiteLLMConfig(store: Store, options: LiteLLMConfigOptions = {}): Promise<string> {
   const publicModels = normalizeList(options.publicModels ?? parseCsv(process.env.LITELLM_PUBLIC_MODELS) ?? defaultPublicModels);
   const upstreamModel = options.upstreamModel ?? process.env.LITELLM_UPSTREAM_MODEL ?? 'mimo-v2.5-pro';
   const masterKey = options.masterKey ?? parseTokenList(process.env.PROXY_TOKENS, 'change-me-proxy')[0];
   const requestTimeoutSeconds = options.requestTimeoutSeconds ?? Math.ceil(Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120000) / 1000);
   const fallbackAliases = options.fallbackAliases ?? Number(process.env.LITELLM_FALLBACK_ALIASES ?? 3);
+  const additionalDropParams = normalizeList(options.additionalDropParams ?? parseCsv(process.env.LITELLM_ADDITIONAL_DROP_PARAMS) ?? defaultAdditionalDropParams);
   const rows = (await store.listActiveKeysForRouting())
     .filter((row) => row.groupEnabled && row.status === 'active')
     .sort((a, b) => a.groupSortOrder - b.groupSortOrder || a.sortOrder - b.sortOrder || a.id - b.id);
@@ -51,7 +69,8 @@ export async function buildLiteLLMConfig(store: Store, options: LiteLLMConfigOpt
           upstreamModel,
           apiBase: row.openaiBaseUrl,
           apiKey: row.apiKey,
-          requestTimeoutSeconds
+          requestTimeoutSeconds,
+          additionalDropParams
         }));
       });
       for (let aliasIndex = 1; aliasIndex <= aliasCount; aliasIndex += 1) {
@@ -61,7 +80,8 @@ export async function buildLiteLLMConfig(store: Store, options: LiteLLMConfigOpt
             upstreamModel,
             apiBase: row.openaiBaseUrl,
             apiKey: row.apiKey,
-            requestTimeoutSeconds
+            requestTimeoutSeconds,
+            additionalDropParams
           }));
         });
       }
@@ -94,7 +114,7 @@ export async function buildLiteLLMConfig(store: Store, options: LiteLLMConfigOpt
   return `${lines.join('\n')}\n`;
 }
 
-function modelEntry(input: { modelName: string; upstreamModel: string; apiBase: string; apiKey: string; requestTimeoutSeconds: number }): string[] {
+function modelEntry(input: { modelName: string; upstreamModel: string; apiBase: string; apiKey: string; requestTimeoutSeconds: number; additionalDropParams: string[] }): string[] {
   return [
     `  - model_name: ${yamlString(input.modelName)}`,
     '    litellm_params:',
@@ -102,6 +122,7 @@ function modelEntry(input: { modelName: string; upstreamModel: string; apiBase: 
     `      api_base: ${yamlString(input.apiBase)}`,
     `      api_key: ${yamlString(input.apiKey)}`,
     '      use_chat_completions_api: true',
+    `      additional_drop_params: [${input.additionalDropParams.map(yamlString).join(', ')}]`,
     `      timeout: ${Number.isFinite(input.requestTimeoutSeconds) && input.requestTimeoutSeconds > 0 ? input.requestTimeoutSeconds : 120}`
   ];
 }

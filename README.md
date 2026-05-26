@@ -70,6 +70,7 @@ npm.cmd run debug
 | `LITELLM_PUBLIC_MODELS` | 内置常用模型列表 | 导出给 LiteLLM 的公开模型名，逗号分隔 |
 | `LITELLM_UPSTREAM_MODEL` | `mimo-v2.5-pro` | LiteLLM 转发给 Mimo 的真实模型名 |
 | `LITELLM_FALLBACK_ALIASES` | `3` | 为 LiteLLM 生成显式 fallback alias 的层数，避免部分场景不在同组 deployment 间 fallback |
+| `LITELLM_ADDITIONAL_DROP_PARAMS` | 内置 Mimo 清洗列表 | LiteLLM 转发给 Mimo 前额外丢弃的参数，逗号分隔 |
 
 ## LiteLLM Proxy 实验模式
 

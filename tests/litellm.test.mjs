@@ -30,6 +30,7 @@ test('buildLiteLLMConfig exports active keys in route order with fallbacks', asy
   assert.match(config, /master_key: "proxy-secret"/);
   assert.match(config, /model: "openai\/mimo-v2\.5-pro"/);
   assert.match(config, /use_chat_completions_api: true/);
+  assert.match(config, /additional_drop_params: \["store", "background", "include"/);
 });
 
 test('buildLiteLLMConfig handles empty pools', async () => {
