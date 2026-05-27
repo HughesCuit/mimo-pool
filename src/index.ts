@@ -1,5 +1,8 @@
 import { createApp } from './server.ts';
 import { createSqliteStore } from './store.ts';
+import { ensureRuntimeConfig } from './env.ts';
+
+await ensureRuntimeConfig();
 
 const port = Number(process.env.PORT ?? 3100);
 const host = process.env.HOST ?? '0.0.0.0';

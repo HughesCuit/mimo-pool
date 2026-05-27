@@ -25,12 +25,10 @@
 npm.cmd install
 npm.cmd run install:browsers
 npm.cmd run build
-$env:ADMIN_TOKEN = "admin-secret"
-$env:PROXY_TOKENS = "proxy-secret"
 npm.cmd start
 ```
 
-打开 `http://localhost:3100/admin`，使用 `ADMIN_TOKEN` 登录后台。
+首次启动会读取 `.env`，如果 `ADMIN_TOKEN` 或 `PROXY_TOKENS` 缺失，会在终端引导你沿用、自动生成或手动输入，并写回 `.env`。打开 `http://localhost:3100/admin`，使用 `ADMIN_TOKEN` 登录后台。
 
 调试模式会输出请求级代理日志，适合排查 Codex 中途停住、上游异常或 Responses 转换问题：
 
