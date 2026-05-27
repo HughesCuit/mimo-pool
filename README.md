@@ -17,11 +17,13 @@
 - 429 / rate limit / 网络错误 / 5xx 会尝试 fallback，并对该 key 做短暂 cooldown，不会永久踢出 key
 - SQLite 持久化，内置 Web 管理界面和 REST 管理 API
 - 支持 `stream: true` 事件流透传
+- 支持多账号 Mimo 平台 Cookie 登录和 token plan 用量查询，API Key 可选绑定账号
 
 ## 快速开始
 
 ```powershell
 npm.cmd install
+npm.cmd run install:browsers
 npm.cmd run build
 $env:ADMIN_TOKEN = "admin-secret"
 $env:PROXY_TOKENS = "proxy-secret"
@@ -64,6 +66,11 @@ npm.cmd run debug
 | `DEBUG_PROXY_LOG_FILE` | 空 | 调试日志文件路径，设置后不在控制台刷完整日志 |
 | `DEBUG_PROXY_BODY` | `0` | 输出截断后的请求/响应正文预览 |
 | `DEBUG_PROXY_BODY_LIMIT` | `2000` | 正文预览最大字符数 |
+| `USAGE_BROWSER_MODE` | `auto` | 用量登录浏览器模式：`auto`、`headed`、`headless` |
+| `USAGE_REFRESH_INTERVAL_MS` | `3600000` | 后台自动刷新所有已登录账号用量的间隔，设为 `0` 可关闭 |
+| `USAGE_LOGIN_TIMEOUT_MS` | `300000` | 等待用户完成小米平台登录的超时时间 |
+| `USAGE_LOGIN_URL` | 小米 Mimo 控制台 | 用量登录抓 Cookie 的页面 |
+| `USAGE_API_URL` | 小米 Mimo 用量接口 | 查询 token plan 用量的接口 |
 
 ## 调用示例
 

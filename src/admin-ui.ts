@@ -74,6 +74,7 @@ export const adminHtml = `<!doctype html>
       <div class="toolbar">
         <button id="poolTab" class="tab active">号池管理</button>
         <button id="chatTab" class="tab">聊天</button>
+        <button id="usageTab" class="tab">账号用量</button>
         <button id="logout" class="secondary">退出</button>
       </div>
     </header>
@@ -147,6 +148,21 @@ export const adminHtml = `<!doctype html>
           </div>
         </section>
       </div>
+      <div id="usageView" class="stack hidden">
+        <section>
+          <h2>账号用量</h2>
+          <div class="row">
+            <input id="accountEmail" placeholder="email 备注">
+            <input id="accountUserId" placeholder="userId">
+            <button id="createAccount">新增账号</button>
+            <button id="refreshAllUsage" class="secondary">刷新全部</button>
+          </div>
+          <p class="muted">API Key 可先不绑定账号；未绑定账号时仅无法展示平台用量。</p>
+        </section>
+        <section>
+          <div id="accountsTable"></div>
+        </section>
+      </div>
       <p id="message" class="muted"></p>
     </main>
   </div>
@@ -156,6 +172,7 @@ export const adminHtml = `<!doctype html>
       token: localStorage.getItem('adminToken') || '',
       groups: [],
       keys: [],
+      accounts: [],
       sessions: loadStoredSessions(),
       activeSessionId: localStorage.getItem('activeSessionId') || ''
     };
@@ -250,12 +267,14 @@ export const adminHtml = `<!doctype html>
     }
 
     async function loadAll() {
-      const result = await Promise.all([api('/groups'), api('/keys')]);
+      const result = await Promise.all([api('/groups'), api('/keys'), api('/accounts')]);
       state.groups = result[0].groups;
       state.keys = result[1].keys;
+      state.accounts = result[2].accounts;
       renderGroups();
       renderKeys();
       renderDirectKeys();
+      renderAccounts();
       msg('已连接');
     }
 
@@ -282,9 +301,11 @@ export const adminHtml = `<!doctype html>
     }
 
     function renderKeys() {
-      el('keysTable').innerHTML = '<table><thead><tr><th>组</th><th>Key</th><th>顺序</th><th>状态</th><th>请求</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' + state.keys.map((key) =>
+      el('keysTable').innerHTML = '<table><thead><tr><th>组</th><th>Key</th><th>账号</th><th>顺序</th><th>状态</th><th>请求</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' + state.keys.map((key) =>
         '<tr>' +
-        '<td>' + key.groupCode + '</td><td>' + key.maskedKey + '</td><td>' + key.sortOrder + '</td>' +
+        '<td>' + key.groupCode + '</td><td>' + key.maskedKey + '</td>' +
+        '<td>' + accountSelectHtml(key) + '</td>' +
+        '<td>' + key.sortOrder + '</td>' +
         '<td><span class="status ' + key.status + '">' + key.status + '</span></td>' +
         '<td>' + key.requestCount + ' / ' + key.successCount + ' / ' + key.failureCount + '</td>' +
         '<td class="muted">' + (key.lastError || key.exhaustedReason || '') + '</td>' +
@@ -299,6 +320,52 @@ export const adminHtml = `<!doctype html>
     function renderDirectKeys() {
       const activeKeys = state.keys.filter((key) => key.status === 'active');
       el('directKey').innerHTML = activeKeys.map((key) => '<option value="' + key.id + '">' + key.groupCode + ' · ' + key.maskedKey + '</option>').join('');
+    }
+
+    function accountSelectHtml(key) {
+      const options = ['<option value="">未绑定</option>'].concat(state.accounts.map((account) => {
+        const label = account.email || account.userId || ('账号 #' + account.id);
+        return '<option value="' + account.id + '" ' + (key.accountId === account.id ? 'selected' : '') + '>' + escapeHtml(label) + '</option>';
+      }));
+      return '<select onchange="bindKeyAccount(' + key.id + ', this.value)">' + options.join('') + '</select>';
+    }
+
+    function renderAccounts() {
+      el('accountsTable').innerHTML = state.accounts.length ? '<table><thead><tr><th>账号</th><th>Cookie</th><th>绑定Key</th><th>用量</th><th>操作</th></tr></thead><tbody>' + state.accounts.map((account) => {
+        const label = escapeHtml(account.email || account.userId || ('账号 #' + account.id));
+        const cookie = account.hasCookie ? escapeHtml(account.maskedCookie || '已保存') : '未登录';
+        const error = account.lastError || (account.usage && account.usage.lastError) || '';
+        return '<tr>' +
+          '<td><div>' + label + '</div><div class="muted">userId: ' + escapeHtml(account.userId || '-') + '</div></td>' +
+          '<td><div>' + cookie + '</div><div class="muted">' + escapeHtml(account.loginStatus) + '</div>' + (error ? '<div class="error">' + escapeHtml(error) + '</div>' : '') + '</td>' +
+          '<td>' + account.keyCount + '</td>' +
+          '<td>' + usageHtml(account.usage) + '</td>' +
+          '<td class="stack">' +
+          '<button class="secondary" onclick="startAccountLogin(' + account.id + ')">浏览器登录</button>' +
+          '<button class="secondary" onclick="pasteAccountCookie(' + account.id + ')">粘贴Cookie</button>' +
+          '<button class="secondary" onclick="refreshAccountUsage(' + account.id + ')">刷新</button>' +
+          '<button class="secondary" onclick="clearAccountCookie(' + account.id + ')">清除Cookie</button>' +
+          '<button class="danger" onclick="deleteAccount(' + account.id + ')">删除</button>' +
+          '</td></tr>';
+      }).join('') + '</tbody></table>' : '<p class="muted">暂无账号</p>';
+    }
+
+    function usageHtml(record) {
+      if (!record || (!record.monthUsage && !record.usage)) return '<span class="muted">暂无用量</span>';
+      return '<div class="stack">' + usageBlock('月度', record.monthUsage) + usageBlock('总量', record.usage) + '<div class="muted">刷新：' + escapeHtml(record.refreshedAt || '-') + '</div></div>';
+    }
+
+    function usageBlock(title, data) {
+      const items = data && Array.isArray(data.items) ? data.items : [];
+      if (!items.length) return '<div><strong>' + title + '</strong>：-</div>';
+      return '<div><strong>' + title + '</strong><br>' + items.map((item) =>
+        escapeHtml(item.name || '-') + ': ' + formatNumber(item.used) + ' / ' + formatNumber(item.limit) + ' (' + String(item.percent ?? 0) + '%)'
+      ).join('<br>') + '</div>';
+    }
+
+    function formatNumber(value) {
+      const number = Number(value || 0);
+      return Number.isFinite(number) ? number.toLocaleString() : String(value || 0);
     }
 
     async function loadModels() {
@@ -384,6 +451,7 @@ export const adminHtml = `<!doctype html>
       switchPage('chat');
       loadModels();
     };
+    el('usageTab').onclick = () => switchPage('usage');
     el('chatMode').onchange = loadModels;
     el('apiType').onchange = loadModels;
     el('directKey').onchange = loadModels;
@@ -391,8 +459,75 @@ export const adminHtml = `<!doctype html>
     function switchPage(page) {
       el('poolTab').classList.toggle('active', page === 'pool');
       el('chatTab').classList.toggle('active', page === 'chat');
+      el('usageTab').classList.toggle('active', page === 'usage');
       el('poolView').classList.toggle('hidden', page !== 'pool');
       el('chatView').classList.toggle('hidden', page !== 'chat');
+      el('usageView').classList.toggle('hidden', page !== 'usage');
+    }
+
+    el('createAccount').onclick = async () => {
+      await api('/accounts', { method: 'POST', body: JSON.stringify({ email: el('accountEmail').value, userId: el('accountUserId').value }) });
+      el('accountEmail').value = '';
+      el('accountUserId').value = '';
+      await loadAll();
+    };
+
+    el('refreshAllUsage').onclick = async () => {
+      const response = await api('/usage/refresh-all', { method: 'POST' });
+      await loadAll();
+      msg('刷新完成：成功 ' + response.result.refreshed + '，失败 ' + response.result.failed);
+    };
+
+    async function bindKeyAccount(keyId, value) {
+      await api('/keys/' + keyId + '/account', { method: 'POST', body: JSON.stringify({ accountId: value ? Number(value) : null }) });
+      await loadAll();
+    }
+
+    async function startAccountLogin(accountId) {
+      await api('/accounts/' + accountId + '/login/start', { method: 'POST' });
+      msg('已打开登录流程，请在浏览器中完成登录');
+      pollAccountLogin(accountId, 0);
+    }
+
+    async function pollAccountLogin(accountId, count) {
+      if (count > 180) {
+        await loadAll();
+        msg('登录等待超时，请稍后查看状态', false);
+        return;
+      }
+      try {
+        const response = await api('/accounts/' + accountId + '/login/status');
+        if (response.login.state === 'success' || response.login.state === 'failed') {
+          await loadAll();
+          msg(response.login.message, response.login.state === 'success');
+          return;
+        }
+      } catch {
+        // Keep polling; loadAll will surface persisted errors after the login job finishes.
+      }
+      setTimeout(() => pollAccountLogin(accountId, count + 1), 1000);
+    }
+
+    async function pasteAccountCookie(accountId) {
+      const cookieHeader = prompt('粘贴完整 Cookie header');
+      if (!cookieHeader) return;
+      await api('/accounts/' + accountId + '/cookie', { method: 'POST', body: JSON.stringify({ cookieHeader }) });
+      await loadAll();
+    }
+
+    async function refreshAccountUsage(accountId) {
+      await api('/accounts/' + accountId + '/refresh', { method: 'POST' });
+      await loadAll();
+    }
+
+    async function clearAccountCookie(accountId) {
+      await api('/accounts/' + accountId + '/cookie', { method: 'DELETE' });
+      await loadAll();
+    }
+
+    async function deleteAccount(accountId) {
+      await api('/accounts/' + accountId, { method: 'DELETE' });
+      await loadAll();
     }
 
     function ensureSession() {
@@ -508,6 +643,12 @@ export const adminHtml = `<!doctype html>
     window.resetKey = resetKey;
     window.deleteKey = deleteKey;
     window.selectSession = selectSession;
+    window.bindKeyAccount = bindKeyAccount;
+    window.startAccountLogin = startAccountLogin;
+    window.pasteAccountCookie = pasteAccountCookie;
+    window.refreshAccountUsage = refreshAccountUsage;
+    window.clearAccountCookie = clearAccountCookie;
+    window.deleteAccount = deleteAccount;
 
     if (state.token) {
       loadAll().then(showApp).catch(() => {

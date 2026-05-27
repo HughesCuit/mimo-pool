@@ -7,6 +7,7 @@ import { readBody, readJson, sendError, sendJson, sendText } from './http.ts';
 import { NoAvailableKeysError, prepareStreamingProxy, proxyCompatibleRequest } from './proxy.ts';
 import { createResponsesSseTransformer, isStreamingResponsesRequest, proxyResponsesViaChatCompletions, responsesChatProxyRequest } from './responses-compat.ts';
 import { createDebugContext, debugBody, debugLog } from './debug.ts';
+import { getAccountLoginStatus, publicAccounts, refreshAccountUsage, refreshAllAccountUsage, saveManualCookie, startAccountLogin, startUsageScheduler } from './usage.ts';
 import type { KeyStatus, Protocol, Store } from './types.ts';
 
 export type ServerOptions = {
@@ -26,6 +27,7 @@ const anthropicRoutes = new Set([
 export function createApp(options: ServerOptions): http.Server {
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? 'change-me-admin';
   const proxyTokens = options.proxyTokens ?? parseTokenList(process.env.PROXY_TOKENS, 'change-me-proxy');
+  startUsageScheduler(options.store);
 
   return http.createServer(async (req, res) => {
     try {
@@ -77,6 +79,55 @@ async function handleAdmin(store: Store, req: IncomingMessage, res: ServerRespon
     const keys = await store.listKeys();
     return sendJson(res, 200, { keys: keys.map(({ apiKey, ...safe }) => safe) });
   }
+  if (req.method === 'GET' && path === '/accounts') {
+    return sendJson(res, 200, { accounts: publicAccounts(await store.listAccounts()) });
+  }
+  if (req.method === 'POST' && path === '/accounts') {
+    const body = await readJson<{ email?: string | null; userId?: string | null }>(req);
+    const account = await store.createAccount({ email: stringOrNull(body.email), userId: stringOrNull(body.userId) });
+    const { cookieHeader, ...safe } = account;
+    return sendJson(res, 201, { account: safe });
+  }
+  const accountMatch = path.match(/^\/accounts\/(\d+)$/);
+  if (accountMatch && req.method === 'PATCH') {
+    const body = await readJson<{ email?: string | null; userId?: string | null }>(req);
+    const account = await store.updateAccount(Number(accountMatch[1]), { email: stringOrNull(body.email), userId: stringOrNull(body.userId) });
+    const { cookieHeader, ...safe } = account;
+    return sendJson(res, 200, { account: safe });
+  }
+  if (accountMatch && req.method === 'DELETE') {
+    await store.deleteAccount(Number(accountMatch[1]));
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  const accountCookieMatch = path.match(/^\/accounts\/(\d+)\/cookie$/);
+  if (accountCookieMatch && req.method === 'POST') {
+    const body = await readJson<{ cookieHeader?: string }>(req);
+    const account = await saveManualCookie(store, Number(accountCookieMatch[1]), String(body.cookieHeader ?? ''));
+    const { cookieHeader, ...safe } = account;
+    return sendJson(res, 200, { account: safe });
+  }
+  if (accountCookieMatch && req.method === 'DELETE') {
+    const account = await store.clearAccountCookie(Number(accountCookieMatch[1]));
+    const { cookieHeader, ...safe } = account;
+    return sendJson(res, 200, { account: safe });
+  }
+  const accountLoginStartMatch = path.match(/^\/accounts\/(\d+)\/login\/start$/);
+  if (accountLoginStartMatch && req.method === 'POST') {
+    return sendJson(res, 202, { login: await startAccountLogin(store, Number(accountLoginStartMatch[1])) });
+  }
+  const accountLoginStatusMatch = path.match(/^\/accounts\/(\d+)\/login\/status$/);
+  if (accountLoginStatusMatch && req.method === 'GET') {
+    return sendJson(res, 200, { login: await getAccountLoginStatus(store, Number(accountLoginStatusMatch[1])) });
+  }
+  const accountRefreshMatch = path.match(/^\/accounts\/(\d+)\/refresh$/);
+  if (accountRefreshMatch && req.method === 'POST') {
+    return sendJson(res, 200, { usage: await refreshAccountUsage(store, Number(accountRefreshMatch[1])) });
+  }
+  if (req.method === 'POST' && path === '/usage/refresh-all') {
+    return sendJson(res, 200, { result: await refreshAllAccountUsage(store) });
+  }
   if (req.method === 'GET' && path === '/export') {
     const snapshot = await store.exportBackup();
     const filename = `mimo-pool-backup-${new Date().toISOString().slice(0, 10)}.json`;
@@ -125,6 +176,14 @@ async function handleAdmin(store: Store, req: IncomingMessage, res: ServerRespon
     res.writeHead(204);
     res.end();
     return;
+  }
+  const keyAccountMatch = path.match(/^\/keys\/(\d+)\/account$/);
+  if (keyAccountMatch && req.method === 'POST') {
+    const body = await readJson<{ accountId?: number | null }>(req);
+    const accountId = body.accountId === undefined || body.accountId === null || body.accountId === 0 ? null : Number(body.accountId);
+    const key = await store.setKeyAccount(Number(keyAccountMatch[1]), accountId);
+    const { apiKey, ...safe } = key;
+    return sendJson(res, 200, { key: safe });
   }
   const resetMatch = path.match(/^\/keys\/(\d+)\/reset$/);
   if (resetMatch && req.method === 'POST') {
@@ -364,4 +423,10 @@ function booleanOrUndefined(value: unknown): boolean | undefined {
 
 function stringOrUndefined(value: unknown): string | undefined {
   return value === undefined ? undefined : String(value);
+}
+
+function stringOrNull(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text ? text : null;
 }
