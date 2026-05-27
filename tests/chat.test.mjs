@@ -32,8 +32,8 @@ test('admin home renders login screen before the management app', async () => {
     assert.match(html, /id="loginView"/);
     assert.match(html, /Admin token/);
     assert.match(html, /id="appShell"/);
-    assert.match(html, /id="usageTab"/);
-    assert.match(html, /id="usageView"/);
+    assert.match(html, /function usageMeterHtml/);
+    assert.match(html, /class="usage-ring"/);
     assert.match(html, /function loadStoredSessions/);
     assert.match(html, /webauthnInterceptor/);
   } finally {

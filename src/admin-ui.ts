@@ -36,6 +36,17 @@ export const adminHtml = `<!doctype html>
     .muted { color: #64748b; }
     .error { color: #b91c1c; white-space: pre-wrap; }
     .ok { color: #166534; }
+    .mini-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .mini-actions button { padding: 4px 7px; font-size: 12px; }
+    .usage-meter { position: relative; display: inline-grid; place-items: center; width: 54px; height: 54px; border: 0; background: transparent; color: #17202a; padding: 0; }
+    .usage-ring { width: 48px; height: 48px; border-radius: 50%; background: conic-gradient(#1f6feb var(--pct), #e5e7eb 0); display: grid; place-items: center; }
+    .usage-ring::after { content: ""; width: 34px; height: 34px; border-radius: 50%; background: #fff; position: absolute; }
+    .usage-percent { position: relative; z-index: 1; font-size: 11px; font-weight: 700; }
+    .usage-popover { position: relative; display: inline-block; }
+    .usage-detail { display: none; position: absolute; z-index: 20; right: 0; top: 60px; width: 320px; max-width: min(320px, calc(100vw - 40px)); background: #fff; border: 1px solid #c8d0d9; border-radius: 8px; box-shadow: 0 10px 24px rgba(15, 23, 42, .14); padding: 12px; line-height: 1.45; }
+    .usage-popover:hover .usage-detail, .usage-popover.open .usage-detail { display: block; }
+    .usage-line { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid #eef2f7; padding-top: 6px; margin-top: 6px; }
+    .usage-line:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
     .chat-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; }
     .session-list { display: grid; gap: 8px; align-content: start; }
     .session-item { width: 100%; text-align: left; background: #fff; color: #17202a; border: 1px solid #dfe3e8; }
@@ -74,7 +85,6 @@ export const adminHtml = `<!doctype html>
       <div class="toolbar">
         <button id="poolTab" class="tab active">号池管理</button>
         <button id="chatTab" class="tab">聊天</button>
-        <button id="usageTab" class="tab">账号用量</button>
         <button id="logout" class="secondary">退出</button>
       </div>
     </header>
@@ -146,21 +156,6 @@ export const adminHtml = `<!doctype html>
               <button id="clearMessages" class="secondary">清空</button>
             </div>
           </div>
-        </section>
-      </div>
-      <div id="usageView" class="stack hidden">
-        <section>
-          <h2>账号用量</h2>
-          <div class="row">
-            <input id="accountEmail" placeholder="email 备注">
-            <input id="accountUserId" placeholder="userId">
-            <button id="createAccount">新增账号</button>
-            <button id="refreshAllUsage" class="secondary">刷新全部</button>
-          </div>
-          <p class="muted">API Key 可先不绑定账号；未绑定账号时仅无法展示平台用量。</p>
-        </section>
-        <section>
-          <div id="accountsTable"></div>
         </section>
       </div>
       <p id="message" class="muted"></p>
@@ -274,7 +269,6 @@ export const adminHtml = `<!doctype html>
       renderGroups();
       renderKeys();
       renderDirectKeys();
-      renderAccounts();
       msg('已连接');
     }
 
@@ -301,10 +295,11 @@ export const adminHtml = `<!doctype html>
     }
 
     function renderKeys() {
-      el('keysTable').innerHTML = '<table><thead><tr><th>组</th><th>Key</th><th>账号</th><th>顺序</th><th>状态</th><th>请求</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' + state.keys.map((key) =>
+      el('keysTable').innerHTML = '<table><thead><tr><th>组</th><th>Key</th><th>账号</th><th>用量</th><th>顺序</th><th>状态</th><th>请求</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' + state.keys.map((key) =>
         '<tr>' +
         '<td>' + key.groupCode + '</td><td>' + key.maskedKey + '</td>' +
         '<td>' + accountSelectHtml(key) + '</td>' +
+        '<td>' + usageMeterHtml(accountForKey(key)) + '</td>' +
         '<td>' + key.sortOrder + '</td>' +
         '<td><span class="status ' + key.status + '">' + key.status + '</span></td>' +
         '<td>' + key.requestCount + ' / ' + key.successCount + ' / ' + key.failureCount + '</td>' +
@@ -323,44 +318,52 @@ export const adminHtml = `<!doctype html>
     }
 
     function accountSelectHtml(key) {
+      const account = accountForKey(key);
       const options = ['<option value="">未绑定</option>'].concat(state.accounts.map((account) => {
         const label = account.email || account.userId || ('账号 #' + account.id);
         return '<option value="' + account.id + '" ' + (key.accountId === account.id ? 'selected' : '') + '>' + escapeHtml(label) + '</option>';
       }));
-      return '<select onchange="bindKeyAccount(' + key.id + ', this.value)">' + options.join('') + '</select>';
+      return '<div class="stack">' +
+        '<select onchange="bindKeyAccount(' + key.id + ', this.value)">' + options.join('') + '</select>' +
+        '<div class="mini-actions">' +
+        '<button class="secondary" onclick="createAndBindAccount(' + key.id + ')">' + (account ? '新账号' : '绑定') + '</button>' +
+        (account ? '<button class="secondary" onclick="startAccountLogin(' + account.id + ')">登录</button>' +
+          '<button class="secondary" onclick="pasteAccountCookie(' + account.id + ')">Cookie</button>' +
+          '<button class="secondary" onclick="refreshAccountUsage(' + account.id + ')">刷新</button>' : '') +
+        '</div></div>';
     }
 
-    function renderAccounts() {
-      el('accountsTable').innerHTML = state.accounts.length ? '<table><thead><tr><th>账号</th><th>Cookie</th><th>绑定Key</th><th>用量</th><th>操作</th></tr></thead><tbody>' + state.accounts.map((account) => {
-        const label = escapeHtml(account.email || account.userId || ('账号 #' + account.id));
-        const cookie = account.hasCookie ? escapeHtml(account.maskedCookie || '已保存') : '未登录';
-        const error = account.lastError || (account.usage && account.usage.lastError) || '';
-        return '<tr>' +
-          '<td><div>' + label + '</div><div class="muted">userId: ' + escapeHtml(account.userId || '-') + '</div></td>' +
-          '<td><div>' + cookie + '</div><div class="muted">' + escapeHtml(account.loginStatus) + '</div>' + (error ? '<div class="error">' + escapeHtml(error) + '</div>' : '') + '</td>' +
-          '<td>' + account.keyCount + '</td>' +
-          '<td>' + usageHtml(account.usage) + '</td>' +
-          '<td class="stack">' +
-          '<button class="secondary" onclick="startAccountLogin(' + account.id + ')">浏览器登录</button>' +
-          '<button class="secondary" onclick="pasteAccountCookie(' + account.id + ')">粘贴Cookie</button>' +
-          '<button class="secondary" onclick="refreshAccountUsage(' + account.id + ')">刷新</button>' +
-          '<button class="secondary" onclick="clearAccountCookie(' + account.id + ')">清除Cookie</button>' +
-          '<button class="danger" onclick="deleteAccount(' + account.id + ')">删除</button>' +
-          '</td></tr>';
-      }).join('') + '</tbody></table>' : '<p class="muted">暂无账号</p>';
+    function accountForKey(key) {
+      return state.accounts.find((account) => account.id === key.accountId) || null;
     }
 
-    function usageHtml(record) {
-      if (!record || (!record.monthUsage && !record.usage)) return '<span class="muted">暂无用量</span>';
+    function usageMeterHtml(account) {
+      if (!account) return '<span class="muted">未绑定</span>';
+      const record = account.usage;
+      if (!record || (!record.monthUsage && !record.usage)) {
+        return '<div class="usage-popover"><button class="usage-meter" onclick="toggleUsageDetail(this)" style="--pct:0%"><span class="usage-ring"></span><span class="usage-percent">--</span></button><div class="usage-detail">' + accountDetailHtml(account) + '<div class="muted">暂无用量，点击账号列的刷新。</div></div></div>';
+      }
+      const percent = Math.max(0, Math.min(100, Number((record.usage && record.usage.percent) ?? (record.monthUsage && record.monthUsage.percent) ?? 0)));
+      return '<div class="usage-popover"><button class="usage-meter" onclick="toggleUsageDetail(this)" style="--pct:' + percent + '%"><span class="usage-ring"></span><span class="usage-percent">' + percent.toFixed(0) + '%</span></button><div class="usage-detail">' + accountDetailHtml(account) + usageDetailHtml(record) + '</div></div>';
+    }
+
+    function accountDetailHtml(account) {
+      const label = escapeHtml(account.email || account.userId || ('账号 #' + account.id));
+      const cookie = account.hasCookie ? escapeHtml(account.maskedCookie || '已保存') : '未登录';
+      const error = account.lastError || (account.usage && account.usage.lastError) || '';
+      return '<div><strong>' + label + '</strong></div><div class="muted">userId: ' + escapeHtml(account.userId || '-') + '</div><div class="muted">Cookie: ' + cookie + '</div><div class="muted">状态: ' + escapeHtml(account.loginStatus) + '</div>' + (error ? '<div class="error">' + escapeHtml(error) + '</div>' : '');
+    }
+
+    function usageDetailHtml(record) {
       return '<div class="stack">' + usageBlock('月度', record.monthUsage) + usageBlock('总量', record.usage) + '<div class="muted">刷新：' + escapeHtml(record.refreshedAt || '-') + '</div></div>';
     }
 
     function usageBlock(title, data) {
       const items = data && Array.isArray(data.items) ? data.items : [];
       if (!items.length) return '<div><strong>' + title + '</strong>：-</div>';
-      return '<div><strong>' + title + '</strong><br>' + items.map((item) =>
-        escapeHtml(item.name || '-') + ': ' + formatNumber(item.used) + ' / ' + formatNumber(item.limit) + ' (' + String(item.percent ?? 0) + '%)'
-      ).join('<br>') + '</div>';
+      return '<div><strong>' + title + '</strong>' + items.map((item) =>
+        '<div class="usage-line"><span>' + escapeHtml(item.name || '-') + '</span><span>' + formatNumber(item.used) + ' / ' + formatNumber(item.limit) + ' (' + String(item.percent ?? 0) + '%)</span></div>'
+      ).join('') + '</div>';
     }
 
     function formatNumber(value) {
@@ -451,7 +454,6 @@ export const adminHtml = `<!doctype html>
       switchPage('chat');
       loadModels();
     };
-    el('usageTab').onclick = () => switchPage('usage');
     el('chatMode').onchange = loadModels;
     el('apiType').onchange = loadModels;
     el('directKey').onchange = loadModels;
@@ -459,24 +461,24 @@ export const adminHtml = `<!doctype html>
     function switchPage(page) {
       el('poolTab').classList.toggle('active', page === 'pool');
       el('chatTab').classList.toggle('active', page === 'chat');
-      el('usageTab').classList.toggle('active', page === 'usage');
       el('poolView').classList.toggle('hidden', page !== 'pool');
       el('chatView').classList.toggle('hidden', page !== 'chat');
-      el('usageView').classList.toggle('hidden', page !== 'usage');
     }
 
-    el('createAccount').onclick = async () => {
-      await api('/accounts', { method: 'POST', body: JSON.stringify({ email: el('accountEmail').value, userId: el('accountUserId').value }) });
-      el('accountEmail').value = '';
-      el('accountUserId').value = '';
+    async function createAndBindAccount(keyId) {
+      const email = prompt('账号 email 备注，可留空') || '';
+      const userId = prompt('userId，可留空') || '';
+      const response = await api('/accounts', { method: 'POST', body: JSON.stringify({ email, userId }) });
+      await api('/keys/' + keyId + '/account', { method: 'POST', body: JSON.stringify({ accountId: response.account.id }) });
       await loadAll();
-    };
+      msg('账号已创建并绑定');
+    }
 
-    el('refreshAllUsage').onclick = async () => {
-      const response = await api('/usage/refresh-all', { method: 'POST' });
-      await loadAll();
-      msg('刷新完成：成功 ' + response.result.refreshed + '，失败 ' + response.result.failed);
-    };
+    function toggleUsageDetail(button) {
+      const popover = button.closest('.usage-popover');
+      if (!popover) return;
+      popover.classList.toggle('open');
+    }
 
     async function bindKeyAccount(keyId, value) {
       await api('/keys/' + keyId + '/account', { method: 'POST', body: JSON.stringify({ accountId: value ? Number(value) : null }) });
@@ -644,6 +646,8 @@ export const adminHtml = `<!doctype html>
     window.deleteKey = deleteKey;
     window.selectSession = selectSession;
     window.bindKeyAccount = bindKeyAccount;
+    window.createAndBindAccount = createAndBindAccount;
+    window.toggleUsageDetail = toggleUsageDetail;
     window.startAccountLogin = startAccountLogin;
     window.pasteAccountCookie = pasteAccountCookie;
     window.refreshAccountUsage = refreshAccountUsage;
