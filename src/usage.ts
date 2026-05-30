@@ -50,6 +50,23 @@ export async function saveManualCookie(store: Store, accountId: number, cookieHe
   });
 }
 
+function normalizeUsagePercent(data: unknown): unknown {
+  if (!data || typeof data !== 'object') return data;
+  const obj = { ...data } as Record<string, unknown>;
+  if (Array.isArray(obj.items)) {
+    obj.items = obj.items.map((item: Record<string, unknown>) => {
+      if (item && typeof item.percent === 'number' && item.percent < 1) {
+        return { ...item, percent: Math.round(item.percent * 10000) / 100 };
+      }
+      return item;
+    });
+  }
+  if (typeof obj.percent === 'number' && obj.percent < 1) {
+    obj.percent = Math.round(obj.percent * 10000) / 100;
+  }
+  return obj;
+}
+
 export async function refreshAccountUsage(store: Store, accountId: number, fetchImpl: typeof fetch = fetch) {
   const account = await store.getAccount(accountId);
   if (!account.cookieHeader) {
@@ -78,8 +95,8 @@ export async function refreshAccountUsage(store: Store, accountId: number, fetch
     }
     await store.setAccountLoginState(accountId, 'logged_in', null);
     return store.saveAccountUsage(accountId, {
-      monthUsage: parsed.data.monthUsage ?? null,
-      usage: parsed.data.usage ?? null,
+      monthUsage: normalizeUsagePercent(parsed.data.monthUsage) ?? null,
+      usage: normalizeUsagePercent(parsed.data.usage) ?? null,
       refreshedAt: nowIso()
     });
   } catch (error) {
